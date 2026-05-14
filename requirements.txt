@@ -1,0 +1,6 @@
+dm_control
+numpy
+scipy
+sklearn
+matplotlib
+cv2
