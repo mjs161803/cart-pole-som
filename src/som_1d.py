@@ -186,6 +186,18 @@ class SOM1D:
         self._freq_bars = []
         self._voronoi_bars = []
         self._ts_curves = []
+        self._plots_freq = []
+        self._plots_voronoi = []
+        self._plots_ts = []
+        self._plots_weights = []
+        self._y_max_weights = [float(np.max(weights_init[c])) for c in range(3)]
+        self._y_min_weights = [float(np.min(weights_init[c])) for c in range(3)]
+        self._y_max_freq = [float(np.max(freq_init[c])) for c in range(3)]
+        self._y_min_freq = [float(np.min(freq_init[c])) for c in range(3)]
+        self._y_max_voronoi = [float(np.max(voronoi_init[c])) for c in range(3)]
+        self._y_min_voronoi = [float(np.min(voronoi_init[c])) for c in range(3)]
+        self._y_max_ts = [1.0, 1e-6, 1e-6]
+        self._y_min_ts = [0.0, 0.0, 0.0]
 
         for col in range(3):
             r, g, b = colors[col]
@@ -197,41 +209,45 @@ class SOM1D:
             p.setTitle(f'{col_titles[col]} — Weights')
             p.setLabel('bottom', 'Neuron')
             p.showGrid(y=True, alpha=0.3)
-            p.enableAutoRange(axis='y')
+            p.setYRange(self._y_min_weights[col], self._y_max_weights[col])
             c = p.plot(x_idx, weights_init[col].copy(), pen=pen,
                        symbol='o', symbolSize=6, symbolBrush=brush, symbolPen=None)
             self._weight_curves.append(c)
+            self._plots_weights.append(p)
 
             # Row 1: winning frequency (bar chart)
             p = self._win.addPlot(row=1, col=col)
             p.setTitle(f'{col_titles[col]} — Winning Frequency')
             p.setLabel('bottom', 'Neuron')
             p.showGrid(y=True, alpha=0.3)
-            p.enableAutoRange(axis='y')
+            p.setYRange(self._y_min_freq[col], self._y_max_freq[col])
             bar = pg.BarGraphItem(x=x_idx, height=freq_init[col].copy(),
                                   width=bar_w, brush=brush, pen=pg.mkPen(None))
             p.addItem(bar)
             self._freq_bars.append(bar)
+            self._plots_freq.append(p)
 
             # Row 2: inverse Voronoi (bar chart)
             p = self._win.addPlot(row=2, col=col)
             p.setTitle(f'{col_titles[col]} — Inv. Voronoi')
             p.setLabel('bottom', 'Neuron')
             p.showGrid(y=True, alpha=0.3)
-            p.enableAutoRange(axis='y')
+            p.setYRange(self._y_min_voronoi[col], self._y_max_voronoi[col])
             bar = pg.BarGraphItem(x=x_idx, height=voronoi_init[col].copy(),
                                   width=bar_w, brush=brush, pen=pg.mkPen(None))
             p.addItem(bar)
             self._voronoi_bars.append(bar)
+            self._plots_voronoi.append(p)
 
             # Row 3: time series
             p = self._win.addPlot(row=3, col=col)
             p.setTitle(ts_titles[col])
             p.setLabel('bottom', 'Step')
             p.showGrid(y=True, alpha=0.3)
-            p.enableAutoRange(axis='y')
+            p.setYRange(self._y_min_ts[col], self._y_max_ts[col])
             c = p.plot([], pen=pg.mkPen(color=(r, g, b), width=1))
             self._ts_curves.append(c)
+            self._plots_ts.append(p)
 
         self._win.show()
 
@@ -248,9 +264,41 @@ class SOM1D:
 
         for col in range(3):
             self._weight_curves[col].setData(x_idx, weights[col])
+            cur_max_w = float(np.max(weights[col]))
+            cur_min_w = float(np.min(weights[col]))
+            if cur_max_w > self._y_max_weights[col] or cur_min_w < self._y_min_weights[col]:
+                self._y_max_weights[col] = max(self._y_max_weights[col], cur_max_w)
+                self._y_min_weights[col] = min(self._y_min_weights[col], cur_min_w)
+                pad = (self._y_max_weights[col] - self._y_min_weights[col]) * 0.1 or 0.1
+                self._plots_weights[col].setYRange(self._y_min_weights[col] - pad, self._y_max_weights[col] + pad)
+
             self._freq_bars[col].setOpts(height=freqs[col])
+            cur_max_f = float(np.max(freqs[col]))
+            cur_min_f = float(np.min(freqs[col]))
+            if cur_max_f > self._y_max_freq[col] or cur_min_f < self._y_min_freq[col]:
+                self._y_max_freq[col] = max(self._y_max_freq[col], cur_max_f)
+                self._y_min_freq[col] = min(self._y_min_freq[col], cur_min_f)
+                pad = (self._y_max_freq[col] - self._y_min_freq[col]) * 0.1 or 0.1
+                self._plots_freq[col].setYRange(self._y_min_freq[col] - pad, self._y_max_freq[col] + pad)
+
             self._voronoi_bars[col].setOpts(height=voronois[col])
+            cur_max_v = float(np.max(voronois[col]))
+            cur_min_v = float(np.min(voronois[col]))
+            if cur_max_v > self._y_max_voronoi[col] or cur_min_v < self._y_min_voronoi[col]:
+                self._y_max_voronoi[col] = max(self._y_max_voronoi[col], cur_max_v)
+                self._y_min_voronoi[col] = min(self._y_min_voronoi[col], cur_min_v)
+                pad = (self._y_max_voronoi[col] - self._y_min_voronoi[col]) * 0.1 or 0.1
+                self._plots_voronoi[col].setYRange(self._y_min_voronoi[col] - pad, self._y_max_voronoi[col] + pad)
+
             ts = np.array(ts_data[col])
             self._ts_curves[col].setData(np.arange(len(ts), dtype=float), ts)
+            if len(ts) > 0:
+                cur_max_ts = float(np.max(ts))
+                cur_min_ts = float(np.min(ts))
+                if cur_max_ts > self._y_max_ts[col] or cur_min_ts < self._y_min_ts[col]:
+                    self._y_max_ts[col] = max(self._y_max_ts[col], cur_max_ts)
+                    self._y_min_ts[col] = min(self._y_min_ts[col], cur_min_ts)
+                    pad = (self._y_max_ts[col] - self._y_min_ts[col]) * 0.1 or 0.1
+                    self._plots_ts[col].setYRange(self._y_min_ts[col] - pad, self._y_max_ts[col] + pad)
 
         self._app.processEvents()
