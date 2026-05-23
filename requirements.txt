@@ -3,4 +3,5 @@ numpy
 scipy
 sklearn
 matplotlib
-cv2
+pyqtgraph
+pyqt6
