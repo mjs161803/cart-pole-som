@@ -8,22 +8,33 @@ class SOM1D:
     def __init__(
         self,
         resolution=10,
-        initial_learning_rate=0.01,
-        conscience_gamma=0.1,
+        lr=0.05,
+        neighborhood_decay = 2,
+        conscience_factor=0.5,
+        conscience_lr=0.01,
         visualize=False,
         viz_update_interval=1,
     ):
         self.resolution = resolution
-        self.initial_learning_rate = initial_learning_rate
-        self.current_learning_rate = initial_learning_rate
-        self.half_learning_rate = initial_learning_rate * 0.5
-        self.conscience_gamma = conscience_gamma
-        self.conscience_gamma_tn = conscience_gamma / 2.0
+        self.lr = lr
+        self.neighborhood_decay = neighborhood_decay
+        self.conscience_factor = conscience_factor
+        self.conscience_wf_learning_rate = conscience_lr
         
         # Weights: monotonically increasing, equally spaced
         self.x_weights = np.linspace(-np.pi, np.pi, resolution)
         self.x1_weights = np.linspace(-np.pi, np.pi, resolution)
         self.x0_weights = np.linspace(-np.pi, np.pi, resolution)
+
+        # Win frequencies for conscience mechanism
+        self.x_winning_freq = np.full(resolution, 1.0 / resolution)
+        self.x1_winning_freq = np.full(resolution, 1.0 / resolution)
+        self.x0_winning_freq = np.full(resolution, 1.0 / resolution)
+
+        # Conscience biases
+        self.x_conscience_bias = np.zeros(resolution)
+        self.x1_conscience_bias = np.zeros(resolution)
+        self.x0_conscience_bias = np.zeros(resolution)
 
         # Average radius to immediate topological neighbors
         def _voronoi_from_weights(w):
@@ -44,101 +55,79 @@ class SOM1D:
         self.score_x1 = 0.0
         self.score_x0 = 0.0
 
-        # Bias for conscience mechanism
-        self.activation_bias_x = np.zeros(resolution)
-        self.activation_bias_x1 = np.zeros(resolution)
-        self.activation_bias_x0 = np.zeros(resolution)
-
-        # Win count for visualization and conscience monitoring
-        self.wins_x = np.zeros(resolution)
-        self.wins_x1 = np.zeros(resolution)
-        self.wins_x0 = np.zeros(resolution)
-
         self.visualize = visualize
         self._viz_update_interval = viz_update_interval
         self._viz_step_count = 0
         if self.visualize:
             self._init_viz()
 
-    def _find_bmu(self, value, weights, activation_bias):
-        distances = np.abs(weights - value) + activation_bias
+    def _find_bmu(self, value, weights, conscience_bias):
+        distances = np.abs(weights - value) - conscience_bias
         return np.argmin(distances)
 
     def _update_weights(self, bmu_idx, value, weights):
-        if bmu_idx > 0:
-            weights[bmu_idx - 1] += self.half_learning_rate * (value - weights[bmu_idx - 1])
-        if bmu_idx < self.resolution - 1:
-            weights[bmu_idx + 1] += self.half_learning_rate * (value - weights[bmu_idx + 1])
-
-    def _update_voronoi(self, bmu_idx, weights, voronoi):
-        neighbors = []
-        if bmu_idx > 0:
-            neighbors.append(bmu_idx - 1)
-        if bmu_idx < self.resolution - 1:
-            neighbors.append(bmu_idx + 1)
-        dists = []
-        for n_idx in neighbors:
-            d = abs(weights[bmu_idx] - weights[n_idx])
-            dists.append(d)
-            voronoi[n_idx] = (voronoi[n_idx] + d) / 2
-        if dists:
-            voronoi[bmu_idx] = (voronoi[bmu_idx] + sum(dists) / len(dists)) / 2
-
-    def _update_conscience(self, bmu_idx, wins, activation_bias, voronoi):
-        wins[bmu_idx] += 1
+        weights[bmu_idx] += self.lr * (value - weights[bmu_idx])
+        #update all other (non-BMU) neurons in the neighborhood where lr is scaled by e^(-dist/neighborhood_decay)
         for i in range(self.resolution):
-            if i == bmu_idx:
-                activation_bias[i] += self.conscience_gamma * voronoi[i]
-            else:
-                activation_bias[i] -= self.conscience_gamma_tn * voronoi[i]
+            if i != bmu_idx:
+                dist = abs(i - bmu_idx)
+                influence = np.exp(-dist / self.neighborhood_decay)
+                weights[i] += self.lr * influence * (value - weights[i])
+
+    def _update_voronoi(self, weights, voronoi):
+        d = np.abs(np.diff(weights))
+        voronoi[0] = d[0]
+        voronoi[1:-1] = (d[:-1] + d[1:]) / 2
+        voronoi[-1] = d[-1]
+
+    def _update_conscience(self, bmu_idx, winning_freq, conscience_bias):
+        # Update winning frequency for BMU
+        winning_freq[bmu_idx] += self.conscience_wf_learning_rate * (1.0 - winning_freq[bmu_idx])
+        # Decay winning frequency for non-BMUs
+        for i in range(self.resolution):
+            if i != bmu_idx:
+                winning_freq[i] += self.conscience_wf_learning_rate * (0.0 - winning_freq[i])
+        # Update conscience bias based on new winning frequencies
+        conscience_bias[:] = self.conscience_factor * ((1.0/self.resolution) - winning_freq)
 
     def step(self, observation, instruction):
         # Step 1: Find BMU in x_weights
-        bmu_x = self._find_bmu(observation, self.x_weights, self.activation_bias_x)
+        bmu_x = self._find_bmu(observation, self.x_weights, self.x_conscience_bias)
 
-        # Step 2: Update BMU weight
-        self.x_weights[bmu_x] += self.current_learning_rate * (observation - self.x_weights[bmu_x])
-
-        # Step 3: Update neighborhood weights
+        # Step 2: Update weights
         self._update_weights(bmu_x, observation, self.x_weights)
 
-        # Step 4: Update voronoi_x for topological neighbors of BMU
-        self._update_voronoi(bmu_x, self.x_weights, self.voronoi_x)
+        # Step 3: Update voronoi_x
+        self._update_voronoi(self.x_weights, self.voronoi_x)
 
-        # Update conscience for x
-        self._update_conscience(bmu_x, self.wins_x, self.activation_bias_x, self.voronoi_x)
+        # Step 4: Update conscience for x
+        self._update_conscience(bmu_x, self.x_winning_freq, self.x_conscience_bias)
 
-        # Step 5: Find BMU for both conditional SOMs (needed for scoring in Step 8)
-        bmu_x1 = self._find_bmu(observation, self.x1_weights, self.activation_bias_x1)
-        bmu_x0 = self._find_bmu(observation, self.x0_weights, self.activation_bias_x0)
+        # Step 5.1: Find BMU for both conditional SOMs (needed for scoring in Step 8)
+        bmu_x1 = self._find_bmu(observation, self.x1_weights, self.x1_conscience_bias)
+        bmu_x0 = self._find_bmu(observation, self.x0_weights, self.x0_conscience_bias)
 
         # Update x1 SOM only when instruction == 1.0
         if instruction == 1.0:
-            # Step 5.2: Update BMU weight
-            self.x1_weights[bmu_x1] += self.current_learning_rate * (observation - self.x1_weights[bmu_x1])
-
-            # Step 5.3: Update neighborhood weights
+            # Step 5a.2: Update weights
             self._update_weights(bmu_x1, observation, self.x1_weights)
 
-            # Step 5.4: Update voronoi_x1 for topological neighbors of BMU
-            self._update_voronoi(bmu_x1, self.x1_weights, self.voronoi_x1)
+            # Step 5a.3: Update voronoi_x1
+            self._update_voronoi(self.x1_weights, self.voronoi_x1)
 
-            # Update conscience for x1
-            self._update_conscience(bmu_x1, self.wins_x1, self.activation_bias_x1, self.voronoi_x1)
+            # Step 5a.4: Update conscience for x1
+            self._update_conscience(bmu_x1, self.x1_winning_freq, self.x1_conscience_bias)
 
         # Update x0 SOM only when instruction == 0.0
         if instruction == 0.0:
-            # Step 5b.2: Update BMU weight
-            self.x0_weights[bmu_x0] += self.current_learning_rate * (observation - self.x0_weights[bmu_x0])
-
-            # Step 5b.3: Update neighborhood weights
+            # Step 5b.2: Update weights
             self._update_weights(bmu_x0, observation, self.x0_weights)
 
-            # Step 5b.4: Update voronoi_x0 for topological neighbors of BMU
-            self._update_voronoi(bmu_x0, self.x0_weights, self.voronoi_x0)
+            # Step 5b.3: Update voronoi_x0
+            self._update_voronoi(self.x0_weights, self.voronoi_x0)
 
-            # Update conscience for x0
-            self._update_conscience(bmu_x0, self.wins_x0, self.activation_bias_x0, self.voronoi_x0)
+            # Step 5b.4: Update conscience for x0
+            self._update_conscience(bmu_x0, self.x0_winning_freq, self.x0_conscience_bias)
 
         # Step 6: Calculate the inverse Voronoi cell size (1 / voronoi) for x, x1, and x0
         self.inv_voronoi_x = np.where(self.voronoi_x != 0, 1.0 / np.where(self.voronoi_x != 0, self.voronoi_x, 1.0), 0.0)
@@ -182,7 +171,7 @@ class SOM1D:
         col_titles = ['x (Marginal)', 'x1 (instruction=1)', 'x0 (instruction=0)']
         ts_titles = ['Instruction', 'Score x0', 'Score x1']
         weights_init = [self.x_weights, self.x1_weights, self.x0_weights]
-        freq_init = [self.wins_x, self.wins_x1, self.wins_x0]
+        freq_init = [self.x_winning_freq, self.x1_winning_freq, self.x0_winning_freq]
         voronoi_init = [self.inv_voronoi_x, self.inv_voronoi_x1, self.inv_voronoi_x0]
 
         self._weight_curves = []
@@ -210,9 +199,9 @@ class SOM1D:
             self._weight_curves.append(c)
             self._plots_weights.append(p)
 
-            # Row 1: total wins (bar chart)
+            # Row 1: winning frequency (bar chart)
             p = self._win.addPlot(row=1, col=col)
-            p.setTitle(f'{col_titles[col]} — Total Wins')
+            p.setTitle(f'{col_titles[col]} — Winning Freq')
             p.setLabel('bottom', 'Neuron')
             p.showGrid(y=True, alpha=0.3)
             p.enableAutoRange('y')
@@ -253,7 +242,7 @@ class SOM1D:
 
         x_idx = np.arange(self.resolution, dtype=float)
         weights = [self.x_weights, self.x1_weights, self.x0_weights]
-        freqs = [self.wins_x, self.wins_x1, self.wins_x0]
+        freqs = [self.x_winning_freq, self.x1_winning_freq, self.x0_winning_freq]
         voronois = [self.inv_voronoi_x, self.inv_voronoi_x1, self.inv_voronoi_x0]
         ts_data = [self._ts_instruction, self._ts_score_x0, self._ts_score_x1]
 
