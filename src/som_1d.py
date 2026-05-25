@@ -65,8 +65,12 @@ class SOM1D:
         if self.visualize:
             self._init_viz()
 
-    def _find_bmu(self, value, weights, conscience_bias):
+    def _find_cbmu(self, value, weights, conscience_bias):
         distances = np.abs(weights - value) - conscience_bias
+        return np.argmin(distances)
+    
+    def _find_bmu(self, value, weights):
+        distances = np.abs(weights - value)
         return np.argmin(distances)
 
     def _update_weights(self, bmu_idx, value, weights, lr=None):
@@ -96,9 +100,25 @@ class SOM1D:
         # Update conscience bias based on new winning frequencies
         conscience_bias[:] = self.conscience_factor * ((1.0/self.resolution) - winning_freq)
 
+    def _calc_prior(self):
+        numerator = 0.0
+        denominator = 0.0
+        for j in range(self.resolution):
+            d_j = self.inv_voronoi_x[j]
+            bmu_1j = self._find_bmu(self.x_weights[j], self.x1_weights)
+            d_1j = self.inv_voronoi_x1[bmu_1j]
+            bmu_0j = self._find_bmu(self.x_weights[j], self.x0_weights)
+            d_0j = self.inv_voronoi_x0[bmu_0j]
+            numerator += (d_j - d_0j) * (d_1j - d_0j)
+            denominator += (d_1j - d_0j) ** 2
+        if denominator != 0:
+            return float(np.clip(numerator / denominator, 0.0, 1.0))
+        else:
+            return 0.5
+
     def step(self, observation, instruction):
         # Step 1: Find BMU in x_weights
-        bmu_x = self._find_bmu(observation, self.x_weights, self.x_conscience_bias)
+        bmu_x = self._find_cbmu(observation, self.x_weights, self.x_conscience_bias)
 
         # Step 2: Update weights
         self._update_weights(bmu_x, observation, self.x_weights, lr=self.lr_x)
@@ -110,8 +130,8 @@ class SOM1D:
         self._update_conscience(bmu_x, self.x_winning_freq, self.x_conscience_bias)
 
         # Step 5.1: Find BMU for both conditional SOMs (needed for scoring in Step 8)
-        bmu_x1 = self._find_bmu(observation, self.x1_weights, self.x1_conscience_bias)
-        bmu_x0 = self._find_bmu(observation, self.x0_weights, self.x0_conscience_bias)
+        bmu_x1 = self._find_cbmu(observation, self.x1_weights, self.x1_conscience_bias)
+        bmu_x0 = self._find_cbmu(observation, self.x0_weights, self.x0_conscience_bias)
 
         # x1 uses self.lr; x0 uses its own slow base rate
         lr_x0 = self.lr_x0
@@ -145,13 +165,7 @@ class SOM1D:
         self.inv_voronoi_x0 = np.where(self.voronoi_x0 != 0, 1.0 / np.where(self.voronoi_x0 != 0, self.voronoi_x0, 1.0), 0.0)
 
         # Step 7: Calculate the prior P(instruction = 1)
-        diff_10 = self.inv_voronoi_x1 - self.inv_voronoi_x0
-        numerator = np.sum((self.inv_voronoi_x - self.inv_voronoi_x0) * diff_10)
-        denominator = np.sum(diff_10 ** 2)
-        if denominator != 0:
-            self.prior_instruction = float(np.clip(numerator / denominator, 0.0, 1.0))
-        else:
-            self.prior_instruction = 0.5
+        self.prior_instruction = self._calc_prior()
 
         # Step 8: Calculate X0 and X1 scores for this observation
         self.score_x1 = self.prior_instruction / self.voronoi_x1[bmu_x1] if self.voronoi_x1[bmu_x1] != 0 else 0.0

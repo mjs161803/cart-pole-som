@@ -29,7 +29,7 @@ action_spec = env.action_spec()
 time_step = env.reset()
 
 # Instantiate the SOM1D for pole angle (creates the PyQtGraph dashboard)
-som = SOM1D(visualize=True, resolution=10, lr_x1=0.05, lr_x=0.001, lr_x0=0.001, neighborhood_decay=3, viz_update_interval=10)
+som = SOM1D(resolution=50, lr_x1=0.0001, lr_x=0.0001, lr_x0=0.0001, neighborhood_decay=3, conscience_factor=1.0, conscience_lr=0.01, viz_update_interval=100, visualize=True)
 
 # Camera render window
 _cam_win = pg.GraphicsLayoutWidget(title='Cart-Pole Camera')
@@ -45,7 +45,7 @@ _app = pg.QtWidgets.QApplication.instance()
 # Sinusoidal action parameters
 _step = 0
 _action_freq = .01   # cycles per step (adjust to taste)
-_render_interval = 100  # render camera every N steps (higher = faster simulation)
+_render_interval = 1000  # render camera every N steps (higher = faster simulation)
 
 # 2. Infinite training loop
 while True:
@@ -62,7 +62,7 @@ while True:
 
     # Extract pole angle from cos/sin components: 0 = vertical (up), ±pi = hanging down
     pole_angle = np.arctan2(observation['position'][2], observation['position'][1])
-    instruction = 1.0 if abs(pole_angle) <= np.deg2rad(45.0) else 0.0
+    instruction = 1.0 if abs(pole_angle) <= np.deg2rad(5.0) else 0.0
     som.step(pole_angle, instruction)
 
     # 3. Visual Rendering: render cartpole camera to PyQtGraph window
