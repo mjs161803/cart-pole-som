@@ -10,54 +10,50 @@ class SOM1D:
         resolution=10,
         lr_x1=0.03,
         lr_x=0.001,
-        lr_x0=0.001,
         neighborhood_decay = 3,
         conscience_factor=0.5,
         conscience_lr=0.03,
+        prior_ema_alpha=0.001,
+        input_min=-np.pi,
+        input_max=np.pi,
         visualize=False,
         viz_update_interval=1,
     ):
         self.resolution = resolution
         self.lr_x1 = lr_x1  # learning rate for x1 (conditional on instruction=1)
         self.lr_x = lr_x    # slow learning rate for marginal SOM (long memory)
-        self.lr_x0 = lr_x0  # slow learning rate for x0 SOM (long memory)
         self.neighborhood_decay = neighborhood_decay
         self.conscience_factor = conscience_factor
         self.conscience_wf_learning_rate = conscience_lr
+        self.prior_ema_alpha = prior_ema_alpha
         
         # Weights: monotonically increasing, equally spaced
-        self.x_weights = np.linspace(-np.pi, np.pi, resolution)
-        self.x1_weights = np.linspace(-np.pi, np.pi, resolution)
-        self.x0_weights = np.linspace(-np.pi, np.pi, resolution)
+        self.x_weights = np.linspace(input_min, input_max, resolution)
+        self.x1_weights = np.linspace(input_min, input_max, resolution)
 
         # Win frequencies for conscience mechanism
         self.x_winning_freq = np.full(resolution, 1.0 / resolution)
         self.x1_winning_freq = np.full(resolution, 1.0 / resolution)
-        self.x0_winning_freq = np.full(resolution, 1.0 / resolution)
 
         # Conscience biases
         self.x_conscience_bias = np.zeros(resolution)
         self.x1_conscience_bias = np.zeros(resolution)
-        self.x0_conscience_bias = np.zeros(resolution)
 
-        # Average radius to immediate topological neighbors
-        def _voronoi_from_weights(w):
-            d = np.diff(w)
-            ar = np.empty(len(w))
-            ar[0] = d[0]
-            ar[1:-1] = (d[:-1] + d[1:]) / 2
-            ar[-1] = d[-1]
-            return ar
+        # Input space boundaries — used to give edge neurons their correct open-ended Voronoi cells
+        self._input_min = float(input_min)
+        self._input_max = float(input_max)
 
-        self.voronoi_x = _voronoi_from_weights(self.x_weights)
-        self.voronoi_x1 = _voronoi_from_weights(self.x1_weights)
-        self.voronoi_x0 = _voronoi_from_weights(self.x0_weights)
-        self.inv_voronoi_x = 1 / self.voronoi_x
+        # Voronoi cell sizes (boundary-aware; populated via the shared helper below)
+        self.voronoi_x  = np.empty(resolution)
+        self.voronoi_x1 = np.empty(resolution)
+        self._update_voronoi(self.x_weights,  self.voronoi_x)
+        self._update_voronoi(self.x1_weights, self.voronoi_x1)
+        self.inv_voronoi_x  = 1 / self.voronoi_x
         self.inv_voronoi_x1 = 1 / self.voronoi_x1
-        self.inv_voronoi_x0 = 1 / self.voronoi_x0
+
         self.prior_instruction = 0.5
         self.score_x1 = 0.0
-        self.score_x0 = 0.0
+        self.posterior_instruction = 0.5
 
         self.visualize = visualize
         self._viz_update_interval = viz_update_interval
@@ -85,10 +81,20 @@ class SOM1D:
                 weights[i] += lr * influence * (value - weights[i])
 
     def _update_voronoi(self, weights, voronoi):
-        d = np.abs(np.diff(weights))
-        voronoi[0] = d[0]
-        voronoi[1:-1] = (d[:-1] + d[1:]) / 2
-        voronoi[-1] = d[-1]
+        # Sort by weight value so we can correctly identify the two boundary neurons.
+        # The neuron with the minimum weight owns everything from input_min to its
+        # midpoint with the next neuron; the maximum-weight neuron owns its midpoint
+        # to input_max.  Using index-order d[0]/d[-1] silently collapses these cells
+        # to a single inter-neuron gap once the SOM compresses into a tight cluster,
+        # making the score formula see spuriously high conditional density everywhere.
+        sorted_idx = np.argsort(weights)
+        sw = weights[sorted_idx]
+        d = np.abs(np.diff(sw))
+        sv = np.empty(len(weights))
+        sv[0]    = (sw[0] - self._input_min) + d[0] / 2
+        sv[1:-1] = (d[:-1] + d[1:]) / 2
+        sv[-1]   = (self._input_max - sw[-1]) + d[-1] / 2
+        voronoi[sorted_idx] = sv
 
     def _update_conscience(self, bmu_idx, winning_freq, conscience_bias):
         # Update winning frequency for BMU
@@ -99,22 +105,6 @@ class SOM1D:
                 winning_freq[i] += self.conscience_wf_learning_rate * (0.0 - winning_freq[i])
         # Update conscience bias based on new winning frequencies
         conscience_bias[:] = self.conscience_factor * ((1.0/self.resolution) - winning_freq)
-
-    def _calc_prior(self):
-        numerator = 0.0
-        denominator = 0.0
-        for j in range(self.resolution):
-            d_j = self.inv_voronoi_x[j]
-            bmu_1j = self._find_bmu(self.x_weights[j], self.x1_weights)
-            d_1j = self.inv_voronoi_x1[bmu_1j]
-            bmu_0j = self._find_bmu(self.x_weights[j], self.x0_weights)
-            d_0j = self.inv_voronoi_x0[bmu_0j]
-            numerator += (d_j - d_0j) * (d_1j - d_0j)
-            denominator += (d_1j - d_0j) ** 2
-        if denominator != 0:
-            return float(np.clip(numerator / denominator, 0.0, 1.0))
-        else:
-            return 0.5
 
     def step(self, observation, instruction):
         # Step 1: Find BMU in x_weights
@@ -129,47 +119,43 @@ class SOM1D:
         # Step 4: Update conscience for x
         self._update_conscience(bmu_x, self.x_winning_freq, self.x_conscience_bias)
 
-        # Step 5.1: Find BMU for both conditional SOMs (needed for scoring in Step 8)
-        bmu_x1 = self._find_cbmu(observation, self.x1_weights, self.x1_conscience_bias)
-        bmu_x0 = self._find_cbmu(observation, self.x0_weights, self.x0_conscience_bias)
+        # Step 5.1: Find BMU for conditional SOM.
+        # Two separate lookups:
+        #   bmu_x1_score — pure nearest-neighbour, no conscience bias.  Used only
+        #                  for density scoring in Step 8.  Conscience bias is a
+        #                  training aid; injecting it here corrupts the density
+        #                  estimate, especially for edge neurons whose x1 firing
+        #                  frequency is under-counted (instruction=0 wins are never
+        #                  tracked, so conscience over-boosts them).
+        #   bmu_x1_train — conscience-adjusted BMU, used only to drive weight and
+        #                  conscience updates when instruction == 1.
+        bmu_x1_score = self._find_bmu(observation, self.x1_weights)
 
-        # x1 uses self.lr; x0 uses its own slow base rate
-        lr_x0 = self.lr_x0
         lr_x1 = self.lr_x1
 
         # Update x1 SOM only when instruction == 1.0
         if instruction == 1.0:
-            # Step 5a.2: Update weights
-            self._update_weights(bmu_x1, observation, self.x1_weights, lr=lr_x1)
+            bmu_x1_train = self._find_cbmu(observation, self.x1_weights, self.x1_conscience_bias)
 
-            # Step 5a.3: Update voronoi_x1
+            # Step 5a.2: Update weights
+            self._update_weights(bmu_x1_train, observation, self.x1_weights, lr=lr_x1)
+
+            # Step 5a.3: Update voronoi_x1 
             self._update_voronoi(self.x1_weights, self.voronoi_x1)
 
             # Step 5a.4: Update conscience for x1
-            self._update_conscience(bmu_x1, self.x1_winning_freq, self.x1_conscience_bias)
+            self._update_conscience(bmu_x1_train, self.x1_winning_freq, self.x1_conscience_bias)
 
-        # Update x0 SOM only when instruction == 0.0
-        if instruction == 0.0:
-            # Step 5b.2: Update weights
-            self._update_weights(bmu_x0, observation, self.x0_weights, lr=lr_x0)
-
-            # Step 5b.3: Update voronoi_x0
-            self._update_voronoi(self.x0_weights, self.voronoi_x0)
-
-            # Step 5b.4: Update conscience for x0
-            self._update_conscience(bmu_x0, self.x0_winning_freq, self.x0_conscience_bias)
-
-        # Step 6: Calculate the inverse Voronoi cell size (1 / voronoi) for x, x1, and x0
+        # Step 6: Calculate the inverse Voronoi cell size (1 / voronoi) for x, x1
         self.inv_voronoi_x = np.where(self.voronoi_x != 0, 1.0 / np.where(self.voronoi_x != 0, self.voronoi_x, 1.0), 0.0)
         self.inv_voronoi_x1 = np.where(self.voronoi_x1 != 0, 1.0 / np.where(self.voronoi_x1 != 0, self.voronoi_x1, 1.0), 0.0)
-        self.inv_voronoi_x0 = np.where(self.voronoi_x0 != 0, 1.0 / np.where(self.voronoi_x0 != 0, self.voronoi_x0, 1.0), 0.0)
 
-        # Step 7: Calculate the prior P(instruction = 1)
-        self.prior_instruction = self._calc_prior()
+        # Step 7: Update EMA estimate of P(instruction = 1)
+        self.prior_instruction += self.prior_ema_alpha * (float(instruction) - self.prior_instruction)
 
-        # Step 8: Calculate X0 and X1 scores for this observation
-        self.score_x1 = self.prior_instruction / self.voronoi_x1[bmu_x1] if self.voronoi_x1[bmu_x1] != 0 else 0.0
-        self.score_x0 = (1 - self.prior_instruction) / self.voronoi_x0[bmu_x0] if self.voronoi_x0[bmu_x0] != 0 else 0.0
+        # Step 8: Calculate and X1 scores for this observation
+        self.score_x1 = self.prior_instruction * (self.voronoi_x[bmu_x] / self.voronoi_x1[bmu_x1_score]) if self.voronoi_x1[bmu_x1_score] != 0 else 0.0
+        self.posterior_instruction = 1.0 if self.score_x1 >= 0.5 else 0.0
 
         if self.visualize:
             self._viz_step_count += 1
@@ -177,35 +163,32 @@ class SOM1D:
                 self._update_viz(instruction)
 
         # Step 9: Return predicted instruction
-        return 1.0 if self.score_x1 > self.score_x0 else 0.0
+        return self.score_x1, self.posterior_instruction
 
     def _init_viz(self):
         self._ts_instruction = deque(maxlen=200)
-        self._ts_score_x0 = deque(maxlen=200)
         self._ts_score_x1 = deque(maxlen=200)
+        self._ts_posterior = deque(maxlen=200)
         self._ts_prior = deque(maxlen=200)
 
         self._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         pg.setConfigOptions(antialias=True)
         self._win = pg.GraphicsLayoutWidget(title='SOM1D Dashboard')
-        self._win.resize(1800, 900)
+        self._win.resize(1200, 1200)
 
         x_idx = np.arange(self.resolution, dtype=float)
         bar_w = 0.7
-        colors = [(180, 130, 70), (80, 127, 255), (60, 180, 75)]
-        col_titles = ['x (Marginal)', 'x1 (instruction=1)', 'x0 (instruction=0)']
-        ts_titles = ['Instruction', 'Score x1', 'Score x0']
-        weights_init = [self.x_weights, self.x1_weights, self.x0_weights]
-        freq_init = [self.x_winning_freq, self.x1_winning_freq, self.x0_winning_freq]
+        colors = [(180, 130, 70), (80, 127, 255)]
+        col_titles = ['x (Marginal)', 'x1 (instruction=1)']
+        weights_init = [self.x_weights, self.x1_weights]
+        freq_init = [self.x_winning_freq, self.x1_winning_freq]
 
         self._weight_curves = []
         self._freq_bars = []
-        self._ts_curves = []
         self._plots_freq = []
-        self._plots_ts = []
         self._plots_weights = []
 
-        for col in range(3):
+        for col in range(2):
             r, g, b = colors[col]
             pen = pg.mkPen(color=(r, g, b), width=2)
             brush = pg.mkBrush(r, g, b, 200)
@@ -233,43 +216,43 @@ class SOM1D:
             self._freq_bars.append(bar)
             self._plots_freq.append(p)
 
-            # Row 2: time series
-            p = self._win.addPlot(row=2, col=col)
-            p.setTitle(ts_titles[col])
+        # Rows 2-5: four stacked time series spanning both columns
+        ts_specs = [
+            ('Instruction',                  (200, 200, 200), False),
+            ('Score x1',                     ( 80, 200, 120), False),
+            ('Posterior P(instruction=1)',   ( 80, 127, 255), True),
+            ('Prior P(instruction=1)',       (220,  80, 220), True),
+        ]
+        self._ts_plots = []
+        self._ts_curves = []
+        for i, (title, color, fixed_range) in enumerate(ts_specs):
+            p = self._win.addPlot(row=2 + i, col=0, colspan=2)
+            p.setTitle(title)
             p.setLabel('bottom', 'Step')
             p.showGrid(y=True, alpha=0.3)
-            p.enableAutoRange('y')
-            c = p.plot([], pen=pg.mkPen(color=(r, g, b), width=1))
+            if fixed_range:
+                p.setYRange(0.0, 1.0)
+                p.addLine(y=0.5, pen=pg.mkPen(color=(150, 150, 150), width=1,
+                          style=pg.QtCore.Qt.PenStyle.DashLine))
+            else:
+                p.enableAutoRange('y')
+            c = p.plot([], pen=pg.mkPen(color=color, width=1))
             self._ts_curves.append(c)
-            self._plots_ts.append(p)
-
-        self._win.show()
-
-        # Row 3: prior P(instruction=1) — spans all 3 columns
-        p = self._win.addPlot(row=3, col=0, colspan=3)
-        p.setTitle('Prior P(instruction=1)')
-        p.setLabel('bottom', 'Step')
-        p.setLabel('left', 'Prior')
-        p.showGrid(y=True, alpha=0.3)
-        p.setYRange(0.0, 1.0)
-        p.addLine(y=0.5, pen=pg.mkPen(color=(150, 150, 150), width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
-        self._prior_curve = p.plot([], pen=pg.mkPen(color=(220, 80, 220), width=2))
-        self._plot_prior = p
+            self._ts_plots.append(p)
 
         self._win.show()
 
     def _update_viz(self, instruction):
         self._ts_instruction.append(float(instruction))
-        self._ts_score_x0.append(self.score_x0)
         self._ts_score_x1.append(self.score_x1)
+        self._ts_posterior.append(self.posterior_instruction)
         self._ts_prior.append(self.prior_instruction)
 
         x_idx = np.arange(self.resolution, dtype=float)
-        weights = [self.x_weights, self.x1_weights, self.x0_weights]
-        freqs = [self.x_winning_freq, self.x1_winning_freq, self.x0_winning_freq]
-        ts_data = [self._ts_instruction, self._ts_score_x1, self._ts_score_x0]
+        weights = [self.x_weights, self.x1_weights]
+        freqs = [self.x_winning_freq, self.x1_winning_freq]
 
-        for col in range(3):
+        for col in range(2):
             self._weight_curves[col].setData(x_idx, weights[col])
             cur_max_w = float(np.max(weights[col]))
             cur_min_w = float(np.min(weights[col]))
@@ -282,15 +265,14 @@ class SOM1D:
             pad = (cur_max_f - cur_min_f) * 0.1 or 0.1
             self._plots_freq[col].setYRange(cur_min_f - pad, cur_max_f + pad)
 
-            ts = np.array(ts_data[col])
-            self._ts_curves[col].setData(np.arange(len(ts), dtype=float), ts)
-            if len(ts) > 0:
+        ts_data = [self._ts_instruction, self._ts_score_x1, self._ts_posterior, self._ts_prior]
+        for i, ts_deque in enumerate(ts_data):
+            ts = np.array(ts_deque)
+            self._ts_curves[i].setData(np.arange(len(ts), dtype=float), ts)
+            if len(ts) > 0 and i < 2:  # auto-range only for instruction and score_x1
                 cur_max_ts = float(np.max(ts))
                 cur_min_ts = float(np.min(ts))
                 pad = (cur_max_ts - cur_min_ts) * 0.1 or 0.1
-                self._plots_ts[col].setYRange(cur_min_ts - pad, cur_max_ts + pad)
-
-        prior_arr = np.array(self._ts_prior)
-        self._prior_curve.setData(np.arange(len(prior_arr), dtype=float), prior_arr)
+                self._ts_plots[i].setYRange(cur_min_ts - pad, cur_max_ts + pad)
 
         self._app.processEvents()
