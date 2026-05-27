@@ -14,8 +14,8 @@ class SOM1D:
         conscience_factor=0.5,
         conscience_lr=0.03,
         prior_ema_alpha=0.001,
-        input_min=-np.pi,
-        input_max=np.pi,
+        input_min=None,
+        input_max=None,
         visualize=False,
         viz_update_interval=1,
     ):
@@ -27,9 +27,14 @@ class SOM1D:
         self.conscience_wf_learning_rate = conscience_lr
         self.prior_ema_alpha = prior_ema_alpha
         
-        # Weights: monotonically increasing, equally spaced
-        self.x_weights = np.linspace(input_min, input_max, resolution)
-        self.x1_weights = np.linspace(input_min, input_max, resolution)
+        # Weights: if bounds are provided at construction, initialise via linspace;
+        # otherwise start all neurons at 0 and let them adapt from observed data.
+        if input_min is not None and input_max is not None:
+            self.x_weights = np.linspace(input_min, input_max, resolution)
+            self.x1_weights = np.linspace(input_min, input_max, resolution)
+        else:
+            self.x_weights = np.zeros(resolution)
+            self.x1_weights = np.zeros(resolution)
 
         # Win frequencies for conscience mechanism
         self.x_winning_freq = np.full(resolution, 1.0 / resolution)
@@ -39,17 +44,22 @@ class SOM1D:
         self.x_conscience_bias = np.zeros(resolution)
         self.x1_conscience_bias = np.zeros(resolution)
 
-        # Input space boundaries — used to give edge neurons their correct open-ended Voronoi cells
-        self._input_min = float(input_min)
-        self._input_max = float(input_max)
+        # Input space boundaries — expanded dynamically as observations arrive.
+        # Both SOMs share the same boundaries so the voronoi_x / voronoi_x1 ratio
+        # remains a valid density comparison across the same domain.
+        # If bounds are provided at construction they are used immediately;
+        # otherwise they remain None until the first call to step().
+        self._input_min = float(input_min) if input_min is not None else None
+        self._input_max = float(input_max) if input_max is not None else None
 
-        # Voronoi cell sizes (boundary-aware; populated via the shared helper below)
-        self.voronoi_x  = np.empty(resolution)
-        self.voronoi_x1 = np.empty(resolution)
-        self._update_voronoi(self.x_weights,  self.voronoi_x)
-        self._update_voronoi(self.x1_weights, self.voronoi_x1)
-        self.inv_voronoi_x  = 1 / self.voronoi_x
-        self.inv_voronoi_x1 = 1 / self.voronoi_x1
+        # Voronoi cell sizes — initialised to 1.0; recomputed each step once bounds are known.
+        self.voronoi_x  = np.ones(resolution)
+        self.voronoi_x1 = np.ones(resolution)
+        if self._input_min is not None:
+            self._update_voronoi(self.x_weights,  self.voronoi_x)
+            self._update_voronoi(self.x1_weights, self.voronoi_x1)
+        self.inv_voronoi_x  = 1.0 / self.voronoi_x
+        self.inv_voronoi_x1 = 1.0 / self.voronoi_x1
 
         self.prior_instruction = 0.5
         self.score_x1 = 0.0
@@ -81,6 +91,9 @@ class SOM1D:
                 weights[i] += lr * influence * (value - weights[i])
 
     def _update_voronoi(self, weights, voronoi):
+        # Guard: skip if bounds are unknown or the observed range is still degenerate.
+        if self._input_min is None or (self._input_max - self._input_min) < 1e-12:
+            return
         # Sort by weight value so we can correctly identify the two boundary neurons.
         # The neuron with the minimum weight owns everything from input_min to its
         # midpoint with the next neuron; the maximum-weight neuron owns its midpoint
@@ -107,6 +120,18 @@ class SOM1D:
         conscience_bias[:] = self.conscience_factor * ((1.0/self.resolution) - winning_freq)
 
     def step(self, observation, instruction):
+        # Expand the observed input range to cover this observation.
+        # Both SOMs use the same boundaries so the voronoi_x / voronoi_x1
+        # density ratio remains meaningful across the same domain.
+        if self._input_min is None:
+            self._input_min = float(observation)
+            self._input_max = float(observation)
+        else:
+            if observation < self._input_min:
+                self._input_min = float(observation)
+            if observation > self._input_max:
+                self._input_max = float(observation)
+
         # Step 1: Find BMU in x_weights
         bmu_x = self._find_cbmu(observation, self.x_weights, self.x_conscience_bias)
 

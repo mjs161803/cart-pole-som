@@ -8,7 +8,7 @@ class TrinityCritic:
     def __init__(
         self,
         n_inputs,
-        input_ranges,
+        input_ranges=None,
         resolution=20,
         lr_x=0.001,
         lr_x1=0.001,
@@ -36,7 +36,7 @@ class TrinityCritic:
         conscience_lr : float
             Learning rate for the conscience mechanism.
         """
-        if len(input_ranges) != n_inputs:
+        if input_ranges is not None and len(input_ranges) != n_inputs:
             raise ValueError(
                 f"input_ranges length ({len(input_ranges)}) must match n_inputs ({n_inputs})"
             )
@@ -50,8 +50,8 @@ class TrinityCritic:
                 neighborhood_decay=neighborhood_decay,
                 conscience_factor=conscience_factor,
                 conscience_lr=conscience_lr,
-                input_min=input_ranges[i][0],
-                input_max=input_ranges[i][1],
+                input_min=input_ranges[i][0] if input_ranges is not None else None,
+                input_max=input_ranges[i][1] if input_ranges is not None else None,
                 visualize=False,
             )
             for i in range(n_inputs)
