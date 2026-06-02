@@ -1,12 +1,19 @@
 import os
 import sys
 
-# Force MuJoCo to use EGL for offscreen rendering; bypasses GLFW/Wayland (libdecor) entirely
-os.environ["MUJOCO_GL"] = "egl"
-
-os.environ["QT_QPA_PLATFORM"] = "xcb"          # force xcb; overrides any shell Wayland setting
-os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts")
-os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
+# Configure rendering backend based on OS
+if sys.platform == "linux":
+    # EGL for offscreen rendering; bypasses GLFW/Wayland (libdecor) entirely
+    os.environ["MUJOCO_GL"] = "egl"
+    os.environ["QT_QPA_PLATFORM"] = "xcb"          # force xcb; overrides any shell Wayland setting
+    os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts")
+    os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
+elif sys.platform == "darwin":
+    # macOS: EGL unavailable; GLFW uses native Cocoa, Qt uses Cocoa by default
+    os.environ["MUJOCO_GL"] = "glfw"
+elif sys.platform == "win32":
+    # Windows: GLFW is the standard rendering backend for MuJoCo
+    os.environ["MUJOCO_GL"] = "glfw"
 
 from dm_control import suite
 import numpy as np
