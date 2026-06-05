@@ -64,6 +64,7 @@ class SOM1D:
         self.prior_instruction = 0.5
         self.score_x1 = 0.0
         self.posterior_instruction = 0.5
+        self.smi = 0.0
 
         self.visualize = visualize
         self._viz_update_interval = viz_update_interval
@@ -108,6 +109,55 @@ class SOM1D:
         sv[1:-1] = (d[:-1] + d[1:]) / 2
         sv[-1]   = (self._input_max - sw[-1]) + d[-1] / 2
         voronoi[sorted_idx] = sv
+
+    def _calc_specific_mutual_info(self):
+        """
+        Compute the aggregate mutual information I(X ; instruction=1) by
+        iterating over every Voronoi region of the marginal SOM (X) and
+        accumulating the expectation of the pointwise log-density ratio.
+
+        For each marginal neuron k:
+          1. Find its corresponding BMU k' in the conditional SOM (X1) using
+             the weight position x_weights[k] as the query.
+          2. Compute the per-region log-ratio:
+               smi_k = log2( voronoi_x[k] / voronoi_x1[k'] )
+          3. Weight by the normalised marginal density:
+               p(x_k) = inv_voronoi_x[k] / sum_j( inv_voronoi_x[j] )
+
+        Aggregate:
+          I(X ; inst=1) = sum_k  p(x_k) * smi_k
+
+        Both SOMs share the same input domain so the per-SOM density
+        normalisers cancel in each ratio.
+
+        Returns
+        -------
+        smi : float
+            Mutual information I(X ; instruction=1) in bits. Positive values
+            indicate that the conditional distribution is more concentrated
+            than the marginal (X is informative about instruction=1).
+        """
+        total_inv_x = self.inv_voronoi_x.sum()
+        if total_inv_x <= 0.0:
+            return 0.0
+
+        # For each marginal neuron find its nearest counterpart in X1.
+        # _find_bmu is scalar; vectorise by broadcasting.
+        x1_bmu_indices = np.array(
+            [self._find_bmu(w, self.x1_weights) for w in self.x_weights]
+        )
+
+        v_x  = self.voronoi_x                   # shape (resolution,)
+        v_x1 = self.voronoi_x1[x1_bmu_indices]  # shape (resolution,)
+
+        # Only include regions where both Voronoi cells are valid.
+        valid = (v_x > 0.0) & (v_x1 > 0.0)
+        if not valid.any():
+            return 0.0
+
+        p_x     = self.inv_voronoi_x[valid] / total_inv_x
+        log_ratio = np.log2(v_x[valid] / v_x1[valid])
+        return float(np.dot(p_x, log_ratio))
 
     def _update_conscience(self, bmu_idx, winning_freq, conscience_bias):
         # Update winning frequency for BMU
@@ -182,13 +232,16 @@ class SOM1D:
         self.score_x1 = self.prior_instruction * (self.voronoi_x[bmu_x] / self.voronoi_x1[bmu_x1_score]) if self.voronoi_x1[bmu_x1_score] != 0 else 0.0
         self.posterior_instruction = 1.0 if self.score_x1 >= 0.5 else 0.0
 
+        # Step 8b: Aggregate mutual information I(X ; instruction=1) over all regions
+        self.smi = self._calc_specific_mutual_info()
+
         if self.visualize:
             self._viz_step_count += 1
             if self._viz_step_count % self._viz_update_interval == 0:
                 self._update_viz(instruction)
 
-        # Step 9: Return predicted instruction
-        return self.score_x1, self.posterior_instruction
+        # Step 9: Return score and specific mutual information
+        return self.score_x1, self.smi
 
     def _init_viz(self):
         self._ts_instruction = deque(maxlen=200)

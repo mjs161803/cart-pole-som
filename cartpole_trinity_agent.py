@@ -49,7 +49,7 @@ n_inputs = len(_input_labels)
 # Instantiate the TrinityCritic (one SOM1D per scalar observation dimension)
 critic = TrinityCritic(
     n_inputs=n_inputs,
-    resolution=80,
+    resolution=40,
     lr_x=0.001,
     lr_x1=0.001,
     neighborhood_decay=10,
