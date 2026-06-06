@@ -112,52 +112,59 @@ class SOM1D:
 
     def _calc_specific_mutual_info(self):
         """
-        Compute the aggregate mutual information I(X ; instruction=1) by
-        iterating over every Voronoi region of the marginal SOM (X) and
-        accumulating the expectation of the pointwise log-density ratio.
+        Estimate KL( p_{x|inst=1} || p_x ) — the KL divergence from the
+        marginal to the conditional distribution — by iterating over every
+        Voronoi region of the conditional SOM (X1) and accumulating the
+        expectation of the pointwise log-density ratio.
 
-        For each marginal neuron k:
-          1. Find its corresponding BMU k' in the conditional SOM (X1) using
-             the weight position x_weights[k] as the query.
+        For each conditional neuron k:
+          1. Find its corresponding BMU k' in the marginal SOM (X) using
+             the weight position x1_weights[k] as the query.
           2. Compute the per-region log-ratio:
-               smi_k = log2( voronoi_x[k] / voronoi_x1[k'] )
-          3. Weight by the normalised marginal density:
-               p(x_k) = inv_voronoi_x[k] / sum_j( inv_voronoi_x[j] )
+               smi_k = log2( voronoi_x[k'] / voronoi_x1[k] )
+          3. Weight by the normalised conditional density:
+               p(x1_k) = inv_voronoi_x1[k] / sum_j( inv_voronoi_x1[j] )
 
         Aggregate:
-          I(X ; inst=1) = sum_k  p(x_k) * smi_k
+          SMI = sum_k  p(x1_k) * smi_k  ≈  KL( p_{x|inst=1} || p_x )
 
-        Both SOMs share the same input domain so the per-SOM density
-        normalisers cancel in each ratio.
+        Weighting by the conditional density ensures that neurons where X1
+        is concentrated (small Voronoi cells, high density) dominate the
+        sum, giving positive values when X1 is more concentrated than X.
 
         Returns
         -------
         smi : float
-            Mutual information I(X ; instruction=1) in bits. Positive values
-            indicate that the conditional distribution is more concentrated
-            than the marginal (X is informative about instruction=1).
+            Approximate KL divergence in bits. Positive values indicate that
+            the conditional distribution is more concentrated than the
+            marginal (X is informative about instruction=1).
         """
-        total_inv_x = self.inv_voronoi_x.sum()
-        if total_inv_x <= 0.0:
+        total_inv_x1 = self.inv_voronoi_x1.sum()
+        if total_inv_x1 <= 0.0:
             return 0.0
 
-        # For each marginal neuron find its nearest counterpart in X1.
-        # _find_bmu is scalar; vectorise by broadcasting.
-        x1_bmu_indices = np.array(
-            [self._find_bmu(w, self.x1_weights) for w in self.x_weights]
+        # For each conditional neuron find its nearest counterpart in x.
+        # Iterating over x1 and weighting by p(x|inst=1) computes
+        # KL(p_{x|inst=1} || p_x), which is always >= 0 in expectation and
+        # correctly gives high values when x1 is concentrated relative to x.
+        # (The previous approach — iterating over x neurons weighted by p(x) —
+        # computes the reverse KL and is dominated by the large Voronoi cells
+        # of x1 boundary neurons, producing spuriously negative results.)
+        x_bmu_indices = np.array(
+            [self._find_bmu(w, self.x_weights) for w in self.x1_weights]
         )
 
-        v_x  = self.voronoi_x                   # shape (resolution,)
-        v_x1 = self.voronoi_x1[x1_bmu_indices]  # shape (resolution,)
+        v_x1 = self.voronoi_x1                  # shape (resolution,)
+        v_x  = self.voronoi_x[x_bmu_indices]    # shape (resolution,)
 
         # Only include regions where both Voronoi cells are valid.
         valid = (v_x > 0.0) & (v_x1 > 0.0)
         if not valid.any():
             return 0.0
 
-        p_x     = self.inv_voronoi_x[valid] / total_inv_x
+        p_x1      = self.inv_voronoi_x1[valid] / total_inv_x1
         log_ratio = np.log2(v_x[valid] / v_x1[valid])
-        return float(np.dot(p_x, log_ratio))
+        return float(np.dot(p_x1, log_ratio))
 
     def _update_conscience(self, bmu_idx, winning_freq, conscience_bias):
         # Update winning frequency for BMU
@@ -182,7 +189,7 @@ class SOM1D:
             if observation > self._input_max:
                 self._input_max = float(observation)
 
-        # Step 1: Find BMU in x_weights
+        # Step 1: Find conscience-biased BMU in x_weights (used for both training and scoring).
         bmu_x = self._find_cbmu(observation, self.x_weights, self.x_conscience_bias)
 
         # Step 2: Update weights
@@ -194,32 +201,21 @@ class SOM1D:
         # Step 4: Update conscience for x
         self._update_conscience(bmu_x, self.x_winning_freq, self.x_conscience_bias)
 
-        # Step 5.1: Find BMU for conditional SOM.
-        # Two separate lookups:
-        #   bmu_x1_score — pure nearest-neighbour, no conscience bias.  Used only
-        #                  for density scoring in Step 8.  Conscience bias is a
-        #                  training aid; injecting it here corrupts the density
-        #                  estimate, especially for edge neurons whose x1 firing
-        #                  frequency is under-counted (instruction=0 wins are never
-        #                  tracked, so conscience over-boosts them).
-        #   bmu_x1_train — conscience-adjusted BMU, used only to drive weight and
-        #                  conscience updates when instruction == 1.
-        bmu_x1_score = self._find_bmu(observation, self.x1_weights)
+        # Step 5: Find conscience-biased BMU in x1_weights (used for both training and scoring).
+        bmu_x1 = self._find_cbmu(observation, self.x1_weights, self.x1_conscience_bias)
 
         lr_x1 = self.lr_x1
 
         # Update x1 SOM only when instruction == 1.0
         if instruction == 1.0:
-            bmu_x1_train = self._find_cbmu(observation, self.x1_weights, self.x1_conscience_bias)
-
             # Step 5a.2: Update weights
-            self._update_weights(bmu_x1_train, observation, self.x1_weights, lr=lr_x1)
+            self._update_weights(bmu_x1, observation, self.x1_weights, lr=lr_x1)
 
             # Step 5a.3: Update voronoi_x1 
             self._update_voronoi(self.x1_weights, self.voronoi_x1)
 
             # Step 5a.4: Update conscience for x1
-            self._update_conscience(bmu_x1_train, self.x1_winning_freq, self.x1_conscience_bias)
+            self._update_conscience(bmu_x1, self.x1_winning_freq, self.x1_conscience_bias)
 
         # Step 6: Calculate the inverse Voronoi cell size (1 / voronoi) for x, x1
         self.inv_voronoi_x = np.where(self.voronoi_x != 0, 1.0 / np.where(self.voronoi_x != 0, self.voronoi_x, 1.0), 0.0)
@@ -229,7 +225,7 @@ class SOM1D:
         self.prior_instruction += self.prior_ema_alpha * (float(instruction) - self.prior_instruction)
 
         # Step 8: Calculate and X1 scores for this observation
-        self.score_x1 = self.prior_instruction * (self.voronoi_x[bmu_x] / self.voronoi_x1[bmu_x1_score]) if self.voronoi_x1[bmu_x1_score] != 0 else 0.0
+        self.score_x1 = self.prior_instruction * (self.voronoi_x[bmu_x] / self.voronoi_x1[bmu_x1]) if self.voronoi_x1[bmu_x1] != 0 else 0.0
         self.posterior_instruction = 1.0 if self.score_x1 >= 0.5 else 0.0
 
         # Step 8b: Aggregate mutual information I(X ; instruction=1) over all regions

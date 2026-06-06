@@ -49,7 +49,7 @@ n_inputs = len(_input_labels)
 # Instantiate the TrinityCritic (one SOM1D per scalar observation dimension)
 critic = TrinityCritic(
     n_inputs=n_inputs,
-    resolution=40,
+    resolution=10,
     lr_x=0.001,
     lr_x1=0.001,
     neighborhood_decay=10,
@@ -57,13 +57,15 @@ critic = TrinityCritic(
     conscience_lr=0.001,
 )
 
-# Recall & precision tracking: per SOM1D
-#   _tp_count        — instruction=1 AND posterior=1 (true positives)
-#   _instruction1_count — instruction=1 (TP + FN, recall denominator)
-#   _predicted1_count   — posterior=1  (TP + FP, precision denominator)
-_tp_count = np.zeros(n_inputs, dtype=np.int64)
-_instruction1_count = np.zeros(n_inputs, dtype=np.int64)
-_predicted1_count = np.zeros(n_inputs, dtype=np.int64)
+# Ensemble-level prediction counters
+_tp_count = 0
+_instruction1_count = 0
+_predicted1_count = 0
+
+# Per-SOM diagnostic accumulators (for average score/SMI display)
+_score_sum = np.zeros(n_inputs)
+_smi_sum   = np.zeros(n_inputs)
+_diag_steps = 0
 
 
 def _process_obs(observation):
@@ -99,45 +101,57 @@ while True:
     # Step the environment forward
     time_step = env.step(action)
 
-    # Access state and reward for your custom AI model
+    # Access state 
     observation = time_step.observation
-    reward = time_step.reward
+    # Flatten the observation dict into a feature vector for the critic, converting cos/sin to θ
+    obs_flat = _process_obs(observation)
 
-    # Extract pole angle from cos/sin components: 0 = vertical (up), ±pi = hanging down
-    pole_angle = np.arctan2(observation['position'][2], observation['position'][1])
+    # Define instruction based on pole angle: 1.0 if |θ| ≤ 5 degrees, else 0.0
+    pole_angle = obs_flat[1]
     instruction = 1.0 if abs(pole_angle) <= np.deg2rad(5.0) else 0.0
 
-    # Flatten the full observation and step the TrinityCritic
-    obs_flat = _process_obs(observation)
-    scores, posteriors = critic.step(obs_flat, instruction)
+    # Step the TrinityCritic
+    prediction, ensemble_score, scores, smi_values = critic.step(obs_flat, instruction)
 
-    # Update recall & precision counters
-    for i, posterior in enumerate(posteriors):
-        if instruction == 1.0:
-            _instruction1_count[i] += 1
-        if posterior == 1.0:
-            _predicted1_count[i] += 1
-        if instruction == 1.0 and posterior == 1.0:
-            _tp_count[i] += 1
+    # Update ensemble-level counters
+    if instruction == 1.0:
+        _instruction1_count += 1
+    if prediction == 1:
+        _predicted1_count += 1
+    if instruction == 1.0 and prediction == 1:
+        _tp_count += 1
 
-    # Print per-SOM1D recall & precision every 50000 steps, then reset counters
+    # Accumulate per-SOM diagnostics
+    for i in range(n_inputs):
+        _score_sum[i] += scores[i]
+        _smi_sum[i]   += smi_values[i]
+    _diag_steps += 1
+
+    # Print diagnostics every 50000 steps, then reset counters
     if _step % 50000 == 0:
-        print(f"\n--- Step {_step} | SOM1D recall & precision (last 50k steps) ---")
-        print(f"  {'#':>3}  {'Feature':<26s}  {'range':<16s}  {'recall':>7}  {'precision':>9}  tp/actual  tp/predicted")
-        print(f"  {'-'*3}  {'-'*26}  {'-'*16}  {'-'*7}  {'-'*9}  {'-'*9}  {'-'*12}")
+        recall    = 100.0 * _tp_count / _instruction1_count if _instruction1_count > 0 else 0.0
+        precision = 100.0 * _tp_count / _predicted1_count   if _predicted1_count   > 0 else 0.0
+        print(f"\n--- Step {_step} | Ensemble recall & precision (last 50k steps) ---")
+        print(f"  Recall: {recall:.1f}%  |  Precision: {precision:.1f}%  |  "
+              f"tp/actual: {_tp_count}/{_instruction1_count}  |  "
+              f"tp/predicted: {_tp_count}/{_predicted1_count}  |  "
+              f"threshold: {critic.ensemble_threshold:.4f}")
+        n = max(_diag_steps, 1)
+        print(f"\n  {'#':>3}  {'Feature':<26s}  {'range':<18s}  {'avg score':>10}  {'avg SMI':>9}")
+        print(f"  {'-'*3}  {'-'*26}  {'-'*18}  {'-'*10}  {'-'*9}")
         for i in range(n_inputs):
-            tp    = int(_tp_count[i])
-            actual = int(_instruction1_count[i])
-            pred   = int(_predicted1_count[i])
-            recall    = 100.0 * tp / actual if actual > 0 else 0.0
-            precision = 100.0 * tp / pred   if pred   > 0 else 0.0
             lo = critic.soms[i]._input_min
             hi = critic.soms[i]._input_max
             range_str = f"[{lo:.3g}, {hi:.3g}]" if lo is not None else "[not yet seen]"
-            print(f"  [{i:2d}] {_input_labels[i]:<26s}  {range_str:<16s}  {recall:6.1f}%  {precision:8.1f}%  {tp}/{actual:<7}  {tp}/{pred}")
-        _tp_count[:] = 0
-        _instruction1_count[:] = 0
-        _predicted1_count[:] = 0
+            avg_score = _score_sum[i] / n
+            avg_smi   = _smi_sum[i]   / n
+            print(f"  [{i:2d}] {_input_labels[i]:<26s}  {range_str:<18s}  {avg_score:10.4f}  {avg_smi:9.4f}")
+        _tp_count = 0
+        _instruction1_count = 0
+        _predicted1_count = 0
+        _score_sum[:] = 0.0
+        _smi_sum[:]   = 0.0
+        _diag_steps = 0
 
     # 3. Visual Rendering: render cartpole camera to PyQtGraph window
     # if _step % _render_interval == 0:
