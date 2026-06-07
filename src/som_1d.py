@@ -189,7 +189,7 @@ class SOM1D:
             if observation > self._input_max:
                 self._input_max = float(observation)
 
-        # Step 1: Find conscience-biased BMU in x_weights (used for both training and scoring).
+        # Step 1: Find conscience-biased BMU in x_weights (used for training).
         bmu_x = self._find_cbmu(observation, self.x_weights, self.x_conscience_bias)
 
         # Step 2: Update weights
@@ -201,7 +201,7 @@ class SOM1D:
         # Step 4: Update conscience for x
         self._update_conscience(bmu_x, self.x_winning_freq, self.x_conscience_bias)
 
-        # Step 5: Find conscience-biased BMU in x1_weights (used for both training and scoring).
+        # Step 5: Find conscience-biased BMU in x1_weights (used for training).
         bmu_x1 = self._find_cbmu(observation, self.x1_weights, self.x1_conscience_bias)
 
         lr_x1 = self.lr_x1
@@ -225,7 +225,10 @@ class SOM1D:
         self.prior_instruction += self.prior_ema_alpha * (float(instruction) - self.prior_instruction)
 
         # Step 8: Calculate and X1 scores for this observation
-        self.score_x1 = self.prior_instruction * (self.voronoi_x[bmu_x] / self.voronoi_x1[bmu_x1]) if self.voronoi_x1[bmu_x1] != 0 else 0.0
+        # Use unbiased BMUs for scoring so conscience bias doesn't distort the density ratio.
+        score_bmu_x  = self._find_bmu(observation, self.x_weights)
+        score_bmu_x1 = self._find_bmu(observation, self.x1_weights)
+        self.score_x1 = self.prior_instruction * (self.voronoi_x[score_bmu_x] / self.voronoi_x1[score_bmu_x1]) if self.voronoi_x1[score_bmu_x1] != 0 else 0.0
         self.posterior_instruction = 1.0 if self.score_x1 >= 0.5 else 0.0
 
         # Step 8b: Aggregate mutual information I(X ; instruction=1) over all regions
@@ -237,7 +240,7 @@ class SOM1D:
                 self._update_viz(instruction)
 
         # Step 9: Return score and specific mutual information
-        return self.score_x1, self.smi
+        return self.posterior_instruction, self.score_x1, self.smi
 
     def _init_viz(self):
         self._ts_instruction = deque(maxlen=200)

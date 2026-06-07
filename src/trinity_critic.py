@@ -1,3 +1,4 @@
+import math
 import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
@@ -15,8 +16,6 @@ class TrinityCritic:
         neighborhood_decay=10,
         conscience_factor=0.5,
         conscience_lr=0.001,
-        ensemble_threshold=0.5,
-        threshold_lr=0.01,
     ):
         """
         Parameters
@@ -37,15 +36,6 @@ class TrinityCritic:
             Conscience factor for the conscience mechanism.
         conscience_lr : float
             Learning rate for the conscience mechanism.
-        ensemble_threshold : float
-            Initial threshold applied to the SMI-weighted ensemble score to
-            produce the binary instruction prediction (default 0.5).
-            Adapted online by _update_threshold.
-        threshold_lr : float
-            Step size for threshold adaptation. On a false negative
-            (instruction=1, prediction=0) the threshold moves down toward the
-            ensemble score; on a false positive (instruction=0, prediction=1)
-            it moves up toward the ensemble score (default 0.01).
         """
         if input_ranges is not None and len(input_ranges) != n_inputs:
             raise ValueError(
@@ -53,8 +43,6 @@ class TrinityCritic:
             )
 
         self.n_inputs = n_inputs
-        self.ensemble_threshold = ensemble_threshold
-        self.threshold_lr = threshold_lr
         self.soms = [
             SOM1D(
                 resolution=resolution,
@@ -91,20 +79,25 @@ class TrinityCritic:
         """
         scores = []
         smi_values = []
+        per_predictions = []
         for i, som in enumerate(self.soms):
-            score, smi = som.step(float(observation[i]), instruction)
+            posterior, score, smi = som.step(float(observation[i]), instruction)
+            per_predictions.append(int(posterior))
             scores.append(score)
             smi_values.append(smi)
-        return scores, smi_values
+        return scores, smi_values, per_predictions
 
     def _calc_ensemble(self, scores, smi_values):
         """
-        Combine per-SOM scores via a weighted sum, where each weight is the
-        corresponding SMI value normalised by the total SMI:
+        Combine per-SOM scores via a log-linear pool (logarithmic opinion pool),
+        where each weight is the corresponding SMI value normalised by the total
+        SMI:
 
-            ensemble_score = sum_i( (smi_i / sum_j(smi_j)) * score_i )
+            p_pool = prod(s_i ^ w_i) / (prod(s_i ^ w_i) + prod((1-s_i) ^ w_i))
 
-        Falls back to an unweighted average when all SMI values are zero.
+        Computed in log-space for numerical stability.  Falls back to equal
+        weights when all SMI values are zero.  Negative SMI values are clipped
+        to 0.0 so non-informative dimensions contribute no weight.
 
         Parameters
         ----------
@@ -118,41 +111,36 @@ class TrinityCritic:
         prediction : int
             1 if ensemble score >= self.ensemble_threshold, else 0.
         ensemble_score : float
-            The weighted sum score before thresholding.
+            The log-linear pooled score before thresholding.
         """
+        if not scores:
+            return 0, 0.0
+
         # Clip negative SMI values to 0.0 — only informative (positive-SMI) dimensions
         # contribute weight.  Negative SMI indicates the dimension is currently less
         # informative than the marginal and should not influence the ensemble.
         clipped_smi = [max(0.0, s) for s in smi_values]
         total_smi = sum(clipped_smi)
         if total_smi > 0:
-            ensemble_score = sum((smi / total_smi) * float(score) for score, smi in zip(scores, clipped_smi))
+            weights = [s / total_smi for s in clipped_smi]
         else:
-            ensemble_score = sum(float(score) for score in scores) / len(scores) if scores else 0.0
-        prediction = 1 if ensemble_score >= self.ensemble_threshold else 0
-        return prediction, ensemble_score
+            weights = [1.0 / len(scores)] * len(scores)
 
-    def _update_threshold(self, instruction, prediction, ensemble_score):
-        """
-        Adapt the ensemble threshold based on prediction errors.
+        # Log-linear pool computed in log-space.
+        # log_num = sum_i( w_i * log(s_i) )
+        # log_den = sum_i( w_i * log(1 - s_i) )
+        # ensemble_score = 1 / (1 + exp(log_den - log_num))
+        _eps = 1e-12
+        log_num = 0.0
+        log_den = 0.0
+        for w, score in zip(weights, scores):
+            s = max(_eps, min(1.0 - _eps, float(score)))
+            log_num += w * math.log(s)
+            log_den += w * math.log(1.0 - s)
 
-        On a false negative (instruction=1, prediction=0) the threshold is
-        shifted down toward ensemble_score.  On a false positive
-        (instruction=0, prediction=1) it is shifted up toward ensemble_score.
-        No adjustment is made on correct predictions.
-
-        Parameters
-        ----------
-        instruction : float
-            The true instruction signal (1.0 or 0.0).
-        prediction : int
-            The binary prediction produced by _calc_ensemble.
-        ensemble_score : float
-            The raw weighted score before thresholding.
-        """
-        if instruction == 1.0 and prediction == 0:
-            # False negative: threshold is too high; move it down toward the score.
-            self.ensemble_threshold += self.threshold_lr * (ensemble_score - self.ensemble_threshold)
+        ensemble_score = 1.0 / (1.0 + math.exp(log_den - log_num))
+        ensemble_prediction = 1 if ensemble_score > 0.5 else 0
+        return ensemble_prediction, ensemble_score
 
     def step(self, observation, instruction):
         """
@@ -167,17 +155,17 @@ class TrinityCritic:
 
         Returns
         -------
-        prediction : int
+        ensemble_prediction : int
             Binary ensemble prediction (0 or 1).
         ensemble_score : float
-            SMI-weighted sum of per-SOM scores, before thresholding.
+            SMI-weighted log-linear pooled score, before thresholding.
         scores : list of float
             Per-SOM probability-like scores.
         smi_values : list of float
             Per-SOM specific mutual information values.
+        per_predictions : list of int
+            Per-SOM binary posterior predictions (posterior_instruction from each SOM1D).
         """
-        scores, smi_values = self._aggregate_scores(observation, instruction)
-        prediction, ensemble_score = self._calc_ensemble(scores, smi_values)
-        if instruction is not None:
-            self._update_threshold(float(instruction), prediction, ensemble_score)
-        return prediction, ensemble_score, scores, smi_values
+        scores, smi_values, per_predictions = self._aggregate_scores(observation, instruction)
+        ensemble_prediction, ensemble_score = self._calc_ensemble(scores, smi_values)
+        return ensemble_prediction, ensemble_score, scores, smi_values, per_predictions
