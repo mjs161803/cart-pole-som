@@ -18,6 +18,7 @@ class SOM1D:
         input_max=None,
         visualize=False,
         viz_update_interval=1,
+        bounds_lr=0.001,
     ):
         self.resolution = resolution
         self.lr_x1 = lr_x1  # learning rate for x1 (conditional on instruction=1)
@@ -26,6 +27,7 @@ class SOM1D:
         self.conscience_factor = conscience_factor
         self.conscience_wf_learning_rate = conscience_lr
         self.prior_ema_alpha = prior_ema_alpha
+        self.bounds_lr = bounds_lr
         
         # Weights: if bounds are provided at construction, initialise via linspace;
         # otherwise start all neurons at 0 and let them adapt from observed data.
@@ -82,18 +84,14 @@ class SOM1D:
 
     def _update_weights(self, bmu_idx, value, weights, lr=None):
         if lr is None:
-            lr = self.lr
-        weights[bmu_idx] += lr * (value - weights[bmu_idx])
-        #update all other (non-BMU) neurons in the neighborhood where lr is scaled by e^(-dist/neighborhood_decay)
-        for i in range(self.resolution):
-            if i != bmu_idx:
-                dist = abs(i - bmu_idx)
-                influence = np.exp(-dist / self.neighborhood_decay)
-                weights[i] += lr * influence * (value - weights[i])
+            lr = self.lr_x
+        indices = np.arange(self.resolution)
+        influence = np.exp(-np.abs(indices - bmu_idx) / self.neighborhood_decay)
+        weights += lr * influence * (value - weights)
 
     def _update_voronoi(self, weights, voronoi):
         # Guard: skip if bounds are unknown or the observed range is still degenerate.
-        if self._input_min is None or (self._input_max - self._input_min) < 1e-12:
+        if self._input_min is None or self._input_max is None or (self._input_max - self._input_min) < 1e-12:
             return
         # Sort by weight value so we can correctly identify the two boundary neurons.
         # The neuron with the minimum weight owns everything from input_min to its
@@ -150,9 +148,7 @@ class SOM1D:
         # (The previous approach — iterating over x neurons weighted by p(x) —
         # computes the reverse KL and is dominated by the large Voronoi cells
         # of x1 boundary neurons, producing spuriously negative results.)
-        x_bmu_indices = np.array(
-            [self._find_bmu(w, self.x_weights) for w in self.x1_weights]
-        )
+        x_bmu_indices = np.argmin(np.abs(self.x1_weights[:, None] - self.x_weights[None, :]), axis=1)
 
         v_x1 = self.voronoi_x1                  # shape (resolution,)
         v_x  = self.voronoi_x[x_bmu_indices]    # shape (resolution,)
@@ -167,27 +163,29 @@ class SOM1D:
         return float(np.dot(p_x1, log_ratio))
 
     def _update_conscience(self, bmu_idx, winning_freq, conscience_bias):
-        # Update winning frequency for BMU
-        winning_freq[bmu_idx] += self.conscience_wf_learning_rate * (1.0 - winning_freq[bmu_idx])
-        # Decay winning frequency for non-BMUs
-        for i in range(self.resolution):
-            if i != bmu_idx:
-                winning_freq[i] += self.conscience_wf_learning_rate * (0.0 - winning_freq[i])
-        # Update conscience bias based on new winning frequencies
-        conscience_bias[:] = self.conscience_factor * ((1.0/self.resolution) - winning_freq)
+        winning_freq *= (1.0 - self.conscience_wf_learning_rate)
+        winning_freq[bmu_idx] += self.conscience_wf_learning_rate
+        conscience_bias[:] = self.conscience_factor * ((1.0 / self.resolution) - winning_freq)
 
     def step(self, observation, instruction):
-        # Expand the observed input range to cover this observation.
-        # Both SOMs use the same boundaries so the voronoi_x / voronoi_x1
-        # density ratio remains meaningful across the same domain.
+        # Expand the observed input range to cover this observation using a
+        # slow asymmetric EMA so that early outliers are gradually forgotten.
+        # Expansion (new extreme): full bounds_lr.
+        # Contraction (observation inside current bounds): bounds_lr * 0.1,
+        # so the range shrinks very slowly as the data distribution shifts.
         if self._input_min is None:
             self._input_min = float(observation)
-            self._input_max = float(observation)
+        elif observation < self._input_min:
+            self._input_min += self.bounds_lr * (observation - self._input_min)
         else:
-            if observation < self._input_min:
-                self._input_min = float(observation)
-            if observation > self._input_max:
-                self._input_max = float(observation)
+            self._input_min += self.bounds_lr * 0.1 * (observation - self._input_min)
+
+        if self._input_max is None:
+            self._input_max = float(observation)
+        elif observation > self._input_max:
+            self._input_max += self.bounds_lr * (observation - self._input_max)
+        else:
+            self._input_max += self.bounds_lr * 0.1 * (observation - self._input_max)
 
         # Step 1: Find conscience-biased BMU in x_weights (used for training).
         bmu_x = self._find_cbmu(observation, self.x_weights, self.x_conscience_bias)

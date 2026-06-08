@@ -57,6 +57,17 @@ class TrinityCritic:
             )
             for i in range(n_inputs)
         ]
+        self.ensemble_som = SOM1D(
+            resolution=2,
+            lr_x=0.01,
+            lr_x1=0.01,
+            neighborhood_decay=2,
+            conscience_factor=0.5,
+            conscience_lr=0.01,
+            input_min=0,
+            input_max=None,
+            visualize=False,
+        )
 
     def _aggregate_scores(self, observation, instruction):
         """
@@ -87,60 +98,21 @@ class TrinityCritic:
             smi_values.append(smi)
         return scores, smi_values, per_predictions
 
-    def _calc_ensemble(self, scores, smi_values):
-        """
-        Combine per-SOM scores via a log-linear pool (logarithmic opinion pool),
-        where each weight is the corresponding SMI value normalised by the total
-        SMI:
-
-            p_pool = prod(s_i ^ w_i) / (prod(s_i ^ w_i) + prod((1-s_i) ^ w_i))
-
-        Computed in log-space for numerical stability.  Falls back to equal
-        weights when all SMI values are zero.  Negative SMI values are clipped
-        to 0.0 so non-informative dimensions contribute no weight.
-
-        Parameters
-        ----------
-        scores : list of float
-            Per-SOM probability-like score for instruction == 1.
-        smi_values : list of float
-            Per-SOM specific mutual information used as pooling weights.
-
-        Returns
-        -------
-        prediction : int
-            1 if ensemble score >= self.ensemble_threshold, else 0.
-        ensemble_score : float
-            The log-linear pooled score before thresholding.
-        """
+    def _calc_ensemble(self, scores, smi_values, instruction):
         if not scores:
             return 0, 0.0
 
-        # Clip negative SMI values to 0.0 — only informative (positive-SMI) dimensions
-        # contribute weight.  Negative SMI indicates the dimension is currently less
-        # informative than the marginal and should not influence the ensemble.
-        clipped_smi = [max(0.0, s) for s in smi_values]
-        total_smi = sum(clipped_smi)
-        if total_smi > 0:
-            weights = [s / total_smi for s in clipped_smi]
-        else:
-            weights = [1.0 / len(scores)] * len(scores)
+        ensemble_score = 0.0
+        for score, smi_value in zip(scores, smi_values):
+            # Clip score to [0, inf) so the log2 base is always >= 1 (log2 >= 0),
+            # keeping the result real for any real smi_value exponent.
+            # Skip the term when the base is 0 and smi_value is negative (would be inf).
+            base = math.log2(1.0 + max(0.0, score))
+            if base > 0.0 or smi_value >= 0.0:
+                ensemble_score += base ** smi_value
 
-        # Log-linear pool computed in log-space.
-        # log_num = sum_i( w_i * log(s_i) )
-        # log_den = sum_i( w_i * log(1 - s_i) )
-        # ensemble_score = 1 / (1 + exp(log_den - log_num))
-        _eps = 1e-12
-        log_num = 0.0
-        log_den = 0.0
-        for w, score in zip(weights, scores):
-            s = max(_eps, min(1.0 - _eps, float(score)))
-            log_num += w * math.log(s)
-            log_den += w * math.log(1.0 - s)
-
-        ensemble_score = 1.0 / (1.0 + math.exp(log_den - log_num))
-        ensemble_prediction = 1 if ensemble_score > 0.5 else 0
-        return ensemble_prediction, ensemble_score
+        ensemble_som_prediction, ensemble_som_score, ensemble_som_smi = self.ensemble_som.step(ensemble_score, instruction)
+        return ensemble_som_prediction, ensemble_score
 
     def step(self, observation, instruction):
         """
@@ -158,7 +130,8 @@ class TrinityCritic:
         ensemble_prediction : int
             Binary ensemble prediction (0 or 1).
         ensemble_score : float
-            SMI-weighted log-linear pooled score, before thresholding.
+            Aggregated score: sum of log2(1 + score_i)^smi_i across all input SOMs,
+            passed to ensemble_som for final prediction.
         scores : list of float
             Per-SOM probability-like scores.
         smi_values : list of float
@@ -167,5 +140,5 @@ class TrinityCritic:
             Per-SOM binary posterior predictions (posterior_instruction from each SOM1D).
         """
         scores, smi_values, per_predictions = self._aggregate_scores(observation, instruction)
-        ensemble_prediction, ensemble_score = self._calc_ensemble(scores, smi_values)
+        ensemble_prediction, ensemble_score = self._calc_ensemble(scores, smi_values, instruction)
         return ensemble_prediction, ensemble_score, scores, smi_values, per_predictions
