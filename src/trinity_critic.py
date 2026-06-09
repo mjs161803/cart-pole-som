@@ -1,6 +1,9 @@
-import math
 import sys
 import os
+import numpy as np
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtWidgets
+from collections import deque
 sys.path.insert(0, os.path.dirname(__file__))
 from som_1d import SOM1D
 
@@ -16,6 +19,8 @@ class TrinityCritic:
         neighborhood_decay=10,
         conscience_factor=0.5,
         conscience_lr=0.001,
+        visualize=False,
+        viz_update_interval=1,
     ):
         """
         Parameters
@@ -41,7 +46,9 @@ class TrinityCritic:
             raise ValueError(
                 f"input_ranges length ({len(input_ranges)}) must match n_inputs ({n_inputs})"
             )
-
+        self.visualize = visualize
+        self._viz_update_interval = viz_update_interval
+        self._viz_step_count = 0
         self.n_inputs = n_inputs
         self.soms = [
             SOM1D(
@@ -53,21 +60,13 @@ class TrinityCritic:
                 conscience_lr=conscience_lr,
                 input_min=input_ranges[i][0] if input_ranges is not None else None,
                 input_max=input_ranges[i][1] if input_ranges is not None else None,
-                visualize=False,
+                visualize=self.visualize,
+                viz_update_interval=self._viz_update_interval,
             )
             for i in range(n_inputs)
         ]
-        self.ensemble_som = SOM1D(
-            resolution=2,
-            lr_x=0.01,
-            lr_x1=0.01,
-            neighborhood_decay=2,
-            conscience_factor=0.5,
-            conscience_lr=0.01,
-            input_min=0,
-            input_max=None,
-            visualize=False,
-        )
+        if self.visualize:
+            self._init_viz()
 
     def _aggregate_scores(self, observation, instruction):
         """
@@ -98,21 +97,23 @@ class TrinityCritic:
             smi_values.append(smi)
         return scores, smi_values, per_predictions
 
-    def _calc_ensemble(self, scores, smi_values, instruction):
+    def _calc_ensemble(self, scores, smi_values):
         if not scores:
             return 0, 0.0
 
-        ensemble_score = 0.0
-        for score, smi_value in zip(scores, smi_values):
-            # Clip score to [0, inf) so the log2 base is always >= 1 (log2 >= 0),
-            # keeping the result real for any real smi_value exponent.
-            # Skip the term when the base is 0 and smi_value is negative (would be inf).
-            base = math.log2(1.0 + max(0.0, score))
-            if base > 0.0 or smi_value >= 0.0:
-                ensemble_score += base ** smi_value
+        smi_sq = [s ** 2 for s in smi_values]
+        total_smi_sq = sum(smi_sq)
 
-        ensemble_som_prediction, ensemble_som_score, ensemble_som_smi = self.ensemble_som.step(ensemble_score, instruction)
-        return ensemble_som_prediction, ensemble_score
+        if total_smi_sq > 0.0:
+            weights = [s / total_smi_sq for s in smi_sq]
+        else:
+            # Fall back to uniform weights when all SMI values are zero.
+            n = len(scores)
+            weights = [1.0 / n] * n
+
+        ensemble_score = sum(w * s for w, s in zip(weights, scores))
+        ensemble_prediction = 1 if ensemble_score >= 0.5 else 0
+        return ensemble_prediction, ensemble_score
 
     def step(self, observation, instruction):
         """
@@ -140,5 +141,59 @@ class TrinityCritic:
             Per-SOM binary posterior predictions (posterior_instruction from each SOM1D).
         """
         scores, smi_values, per_predictions = self._aggregate_scores(observation, instruction)
-        ensemble_prediction, ensemble_score = self._calc_ensemble(scores, smi_values, instruction)
+        ensemble_prediction, ensemble_score = self._calc_ensemble(scores, smi_values)
+
+        if self.visualize:
+            self._viz_step_count += 1
+            if self._viz_step_count % self._viz_update_interval == 0:
+                self._update_viz(ensemble_score, ensemble_prediction)
+
         return ensemble_prediction, ensemble_score, scores, smi_values, per_predictions
+
+    def _init_viz(self):
+        self._ts_ensemble_score = deque(maxlen=200)
+        self._ts_ensemble_prediction = deque(maxlen=200)
+
+        self._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        pg.setConfigOptions(antialias=True)
+        self._win = pg.GraphicsLayoutWidget(title='TrinityCritic Dashboard')
+        self._win.resize(900, 500)
+
+        ts_specs = [
+            ('Ensemble Score',      (255, 180,  50), False),
+            ('Ensemble Prediction', ( 80, 127, 255), True),
+        ]
+        self._tc_ts_plots = []
+        self._tc_ts_curves = []
+        for i, (title, color, fixed_range) in enumerate(ts_specs):
+            p = self._win.addPlot(row=i, col=0)
+            p.setTitle(title)
+            p.setLabel('bottom', 'Step')
+            p.showGrid(y=True, alpha=0.3)
+            if fixed_range:
+                p.setYRange(-0.1, 1.1)
+                p.addLine(y=0.5, pen=pg.mkPen(color=(150, 150, 150), width=1,
+                          style=pg.QtCore.Qt.PenStyle.DashLine))
+            else:
+                p.enableAutoRange('y')
+            c = p.plot([], pen=pg.mkPen(color=color, width=1))
+            self._tc_ts_curves.append(c)
+            self._tc_ts_plots.append(p)
+
+        self._win.show()
+
+    def _update_viz(self, ensemble_score, ensemble_prediction):
+        self._ts_ensemble_score.append(float(ensemble_score))
+        self._ts_ensemble_prediction.append(float(ensemble_prediction))
+
+        ts_data = [self._ts_ensemble_score, self._ts_ensemble_prediction]
+        for i, ts_deque in enumerate(ts_data):
+            ts = np.array(ts_deque)
+            self._tc_ts_curves[i].setData(np.arange(len(ts), dtype=float), ts)
+            if i == 0 and len(ts) > 0:  # auto-range for ensemble score
+                cur_max = float(np.max(ts))
+                cur_min = float(np.min(ts))
+                pad = (cur_max - cur_min) * 0.1 or 0.1
+                self._tc_ts_plots[i].setYRange(cur_min - pad, cur_max + pad)
+
+        self._app.processEvents()

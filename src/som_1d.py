@@ -18,7 +18,6 @@ class SOM1D:
         input_max=None,
         visualize=False,
         viz_update_interval=1,
-        bounds_lr=0.001,
     ):
         self.resolution = resolution
         self.lr_x1 = lr_x1  # learning rate for x1 (conditional on instruction=1)
@@ -27,8 +26,7 @@ class SOM1D:
         self.conscience_factor = conscience_factor
         self.conscience_wf_learning_rate = conscience_lr
         self.prior_ema_alpha = prior_ema_alpha
-        self.bounds_lr = bounds_lr
-        
+
         # Weights: if bounds are provided at construction, initialise via linspace;
         # otherwise start all neurons at 0 and let them adapt from observed data.
         if input_min is not None and input_max is not None:
@@ -168,24 +166,16 @@ class SOM1D:
         conscience_bias[:] = self.conscience_factor * ((1.0 / self.resolution) - winning_freq)
 
     def step(self, observation, instruction):
-        # Expand the observed input range to cover this observation using a
-        # slow asymmetric EMA so that early outliers are gradually forgotten.
-        # Expansion (new extreme): full bounds_lr.
-        # Contraction (observation inside current bounds): bounds_lr * 0.1,
-        # so the range shrinks very slowly as the data distribution shifts.
+        # Track the running min/max over all observations.
         if self._input_min is None:
             self._input_min = float(observation)
-        elif observation < self._input_min:
-            self._input_min += self.bounds_lr * (observation - self._input_min)
         else:
-            self._input_min += self.bounds_lr * 0.1 * (observation - self._input_min)
+            self._input_min = min(self._input_min, float(observation))
 
         if self._input_max is None:
             self._input_max = float(observation)
-        elif observation > self._input_max:
-            self._input_max += self.bounds_lr * (observation - self._input_max)
         else:
-            self._input_max += self.bounds_lr * 0.1 * (observation - self._input_max)
+            self._input_max = max(self._input_max, float(observation))
 
         # Step 1: Find conscience-biased BMU in x_weights (used for training).
         bmu_x = self._find_cbmu(observation, self.x_weights, self.x_conscience_bias)
@@ -245,6 +235,7 @@ class SOM1D:
         self._ts_score_x1 = deque(maxlen=200)
         self._ts_posterior = deque(maxlen=200)
         self._ts_prior = deque(maxlen=200)
+        self._ts_smi = deque(maxlen=200)
 
         self._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         pg.setConfigOptions(antialias=True)
@@ -291,12 +282,13 @@ class SOM1D:
             self._freq_bars.append(bar)
             self._plots_freq.append(p)
 
-        # Rows 2-5: four stacked time series spanning both columns
+        # Rows 2-6: five stacked time series spanning both columns
         ts_specs = [
             ('Instruction',                  (200, 200, 200), False),
             ('Score x1',                     ( 80, 200, 120), False),
             ('Posterior P(instruction=1)',   ( 80, 127, 255), True),
             ('Prior P(instruction=1)',       (220,  80, 220), True),
+            ('Specific Mutual Information',  (255, 180,  50), False),
         ]
         self._ts_plots = []
         self._ts_curves = []
@@ -322,6 +314,7 @@ class SOM1D:
         self._ts_score_x1.append(self.score_x1)
         self._ts_posterior.append(self.posterior_instruction)
         self._ts_prior.append(self.prior_instruction)
+        self._ts_smi.append(self.smi)
 
         x_idx = np.arange(self.resolution, dtype=float)
         weights = [self.x_weights, self.x1_weights]
@@ -340,7 +333,7 @@ class SOM1D:
             pad = (cur_max_f - cur_min_f) * 0.1 or 0.1
             self._plots_freq[col].setYRange(cur_min_f - pad, cur_max_f + pad)
 
-        ts_data = [self._ts_instruction, self._ts_score_x1, self._ts_posterior, self._ts_prior]
+        ts_data = [self._ts_instruction, self._ts_score_x1, self._ts_posterior, self._ts_prior, self._ts_smi]
         for i, ts_deque in enumerate(ts_data):
             ts = np.array(ts_deque)
             self._ts_curves[i].setData(np.arange(len(ts), dtype=float), ts)

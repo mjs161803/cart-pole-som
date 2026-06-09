@@ -49,12 +49,14 @@ n_inputs = len(_input_labels)
 # Instantiate the TrinityCritic (one SOM1D per scalar observation dimension)
 critic = TrinityCritic(
     n_inputs=n_inputs,
-    resolution=180,
-    lr_x=0.001,
-    lr_x1=0.001,
-    neighborhood_decay=180,
+    resolution=360,
+    lr_x=0.0001,
+    lr_x1=0.0001,
+    neighborhood_decay=360,
     conscience_factor=0.5,
-    conscience_lr=0.001,
+    conscience_lr=0.0001,
+    visualize=False,
+    viz_update_interval=100,
 )
 
 # Ensemble-level prediction counters
@@ -71,7 +73,6 @@ _per_predicted1 = np.zeros(n_inputs, dtype=int)
 _score_sum = np.zeros(n_inputs)
 _smi_sum   = np.zeros(n_inputs)
 _ensemble_score_sum  = 0.0
-_ensemble_som_smi_sum = 0.0
 _diag_steps = 0
 
 
@@ -97,7 +98,7 @@ def _process_obs(observation):
 # Sinusoidal action parameters
 _step = 0
 _action_freq = .01   # cycles per step (adjust to taste)
-_render_interval = 1000  # render camera every N steps (higher = faster simulation)
+# _render_interval = 1000  # render camera every N steps (higher = faster simulation)
 
 # 2. Infinite training loop
 while True:
@@ -142,7 +143,6 @@ while True:
         _score_sum[i] += scores[i]
         _smi_sum[i]   += smi_values[i]
     _ensemble_score_sum  += ensemble_score
-    _ensemble_som_smi_sum += critic.ensemble_som.smi
     _diag_steps += 1
 
     # Print diagnostics every 50000 steps, then reset counters
@@ -165,12 +165,8 @@ while True:
             per_recall    = 100.0 * _per_tp[i] / _per_actual1[i]    if _per_actual1[i]    > 0 else 0.0
             per_precision = 100.0 * _per_tp[i] / _per_predicted1[i] if _per_predicted1[i] > 0 else 0.0
             print(f"  [{i:2d}] {_input_labels[i]:<26s}  {range_str:<18s}  {avg_score:10.4f}  {avg_smi:9.4f}  {per_recall:6.1f}%  {per_precision:8.1f}%")
-        ens_lo = critic.ensemble_som._input_min
-        ens_hi = critic.ensemble_som._input_max
-        ens_range_str = f"[{ens_lo:.3g}, {ens_hi:.3g}]" if ens_lo is not None else "[not yet seen]"
         avg_ens_score = _ensemble_score_sum / n
-        avg_ens_smi   = _ensemble_som_smi_sum / n
-        print(f"\n  Ensemble SOM — input range: {ens_range_str}  |  avg raw score: {avg_ens_score:.4f}  |  avg SMI: {avg_ens_smi:.4f}")
+        print(f"\n  Ensemble — avg score: {avg_ens_score:.4f}")
         _tp_count = 0
         _instruction1_count = 0
         _predicted1_count = 0
@@ -180,7 +176,6 @@ while True:
         _score_sum[:] = 0.0
         _smi_sum[:]   = 0.0
         _ensemble_score_sum  = 0.0
-        _ensemble_som_smi_sum = 0.0
         _diag_steps = 0
 
     # 3. Visual Rendering: render cartpole camera to PyQtGraph window
