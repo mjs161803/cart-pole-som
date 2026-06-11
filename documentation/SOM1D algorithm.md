@@ -1,51 +1,45 @@
 # SOM1D Classification Algorithm
 
-## 1. Extract Codebooks and Volumes
+## Each step of the Envrironment
+1) Update min and max sensation
+2) Update prior P(instruction=1)
+3) Find conscience-biased marginal BMU
+4) Update marginal weight of marginal BMU
+5) Update marginal Voronoi regions
+6) Update marginal conscience biases
+7) Find conscience-biased conditional BMU
+8) If instruction = 1:
+    8.1) Update conditional weight of conditional BMU
+    8.2) Update conditional Voronoi regions
+    8.3) Update conditional consciences
+9) Find unbiased marginal BMU
+10) Find unbiased conditional BMU
+11) Calculate score = the posterior P(instruction=1)
+12) Calculate prediction = 1 if score > 0.5, = 0 otherwise
+13) Calculate pointwise mutual information I(X=x; instruction=1)
+14) return score, prediction, pmi 
 
-As online data is presented to the 1D-SOM in the form of (observation, instruction), all three trained Conscience Self-Organizing Maps (CSOMs) will train their weights such that the winning neuron transmits an estimate of their Voronoi region.  These are used to create 'Codebooks'. You will have:
+## Neuronal-Perspective
+For each step from the environment, each neuron follows the same algorithm:
+1) Process sensor input (x) & instruction input (instr)
+    1.1) Calculate its own conscience-biased Euclidean distance between x and marginal weight (E_cb)
+    1.2) If E_cb is the lowest (i.e. - E_cb < All E'_cb of neighbors):
+        1.2.1) Set activation_state = True
+        1.2.2) Update marginal weight
+        1.2.3) Find closest_above neighbor weight
+        1.2.4) Find closest_below neighbor weight
+        1.2.5) Update Voronoi region
+    1.3) Update conscience based on activation_state
+    1.4) If instr = True: Update conditional weight
+    1.5) Update prior for P(instr=1)
+    1.6) If activation_state = True: Transmit post-synaptic information i
+2) Process neighbor input (i.e. - post-synaptic transmission from BMU)
+    2.1) Update neighbor info:
+            2.1.1) marginal weight
+            2.1.2) conditional weight
+            2.1.3) marginal conscience bias
+            2.1.4) conditional conscience bias
+            2.1.4) Voronoi region
+    2.2) Check against marginal&conditional cloesest_above and below, and update if necessary
 
-- **Map $X$ (Marginal):** Codebook $C_X$, Volumes $V_X$
-- **Map 1 (Conditional $\text{instruction}=1$):** Codebook $C_1$, Volumes $V_1$
-- **Map 0 (Conditional $\text{instruction}=0$):** Codebook $C_0$, Volumes $V_0$
-
-## 2. Estimate the Prior via Least Squares
-
-The prior $\pi = P(\text{instruction}=1)$ is found using $P(x) = \pi P(x|\text{instruction}=1) + (1-\pi) P(x|\text{instruction}=0)$. 
-
-We evaluate the equation over the $N$ prototype vectors of your marginal map ($C_X$) and solve using Ordinary Least Squares (OLS) to get a robust global estimate.
-
-For each prototype vector $c_j \in C_X$:
-
-- The inverse volume in the marginal map: $d_j = \frac{1}{V_{X, j}}$
-- Find the BMU for $c_j$ in Map 1 and get its inverse volume: $d_{1,j} = \frac{1}{V_{1, w_1(c_j)}}$
-- Find the BMU for $c_j$ in Map 0 and get its inverse volume: $d_{0,j} = \frac{1}{V_{0, w_0(c_j)}}$
-
-Now, solve for the estimated prior $\hat{\pi}$ using the OLS closed-form solution:
-
-$$\hat{\pi} = \frac{\sum_{j=1}^N (d_j - d_{0,j})(d_{1,j} - d_{0,j})}{\sum_{j=1}^N (d_{1,j} - d_{0,j})^2}$$
-
-> **Constraint:** Clip $\hat{\pi}$ to the interval $[0, 1]$ in case of extreme quantization artifacts.
-
-## 3. Evaluate the New Observation
-
-For a new, unclassified input vector $x_{\text{new}}$:
-
-1. Pass $x_{\text{new}}$ into Map 1 to find its BMU. Retrieve that neuron's volume, $V_{1,\text{new}}$.
-2. Pass $x_{\text{new}}$ into Map 0 to find its BMU. Retrieve that neuron's volume, $V_{0,\text{new}}$.
-
-> **Note:** You do not need to pass $x_{\text{new}}$ into the marginal Map $X$; it was only needed in Step 2 to establish the prior.
-
-## 4. Apply the Decision Rule
-
-Using Bayes' classifier, predict the class that yields the highest posterior probability. Because the denominator $P(x)$ is the same for both classes, you only need to compare the scaled likelihoods.
-
-Calculate the classification scores:
-
-- **Score for $\text{instruction}=1$:** $S_1 = \dfrac{\hat{\pi}}{V_{1,\text{new}}}$
-- **Score for $\text{instruction}=0$:** $S_0 = \dfrac{1 - \hat{\pi}}{V_{0,\text{new}}}$
-
-**Prediction:**
-
-- If $S_1 > S_0$, predict $\text{instruction} = 1$.
-- Otherwise, predict $\text{instruction} = 0$.
 
