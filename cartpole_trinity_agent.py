@@ -49,12 +49,11 @@ n_inputs = len(_input_labels)
 # Instantiate the TrinityCritic (one SOM1D per scalar observation dimension)
 critic = TrinityCritic(
     n_inputs=n_inputs,
-    resolution=360,
-    lr_x=0.0001,
-    lr_x1=0.0001,
-    neighborhood_decay=360,
+    resolution=180,
+    lr=0.0005,
     conscience_factor=0.5,
-    conscience_lr=0.0001,
+    conscience_lr=0.0005,
+    prior_ema_alpha=0.0005,
     visualize=False,
     viz_update_interval=100,
 )
@@ -71,7 +70,7 @@ _per_predicted1 = np.zeros(n_inputs, dtype=int)
 
 # Per-SOM diagnostic accumulators (for average score/SMI display)
 _score_sum = np.zeros(n_inputs)
-_smi_sum   = np.zeros(n_inputs)
+_pmi_sum   = np.zeros(n_inputs)
 _ensemble_score_sum  = 0.0
 _diag_steps = 0
 
@@ -119,7 +118,7 @@ while True:
     instruction = 1.0 if abs(pole_angle) <= np.deg2rad(5.0) else 0.0
 
     # Step the TrinityCritic
-    ensemble_prediction, ensemble_score, scores, smi_values, per_predictions = critic.step(obs_flat, instruction)
+    ensemble_prediction, ensemble_score, scores, pmi_values, per_predictions = critic.step(obs_flat, instruction)
 
     # Update ensemble-level counters
     if instruction == 1.0:
@@ -141,7 +140,7 @@ while True:
     # Accumulate per-SOM diagnostics
     for i in range(n_inputs):
         _score_sum[i] += scores[i]
-        _smi_sum[i]   += smi_values[i]
+        _pmi_sum[i]   += pmi_values[i]
     _ensemble_score_sum  += ensemble_score
     _diag_steps += 1
 
@@ -154,17 +153,17 @@ while True:
               f"tp/actual: {_tp_count}/{_instruction1_count}  |  "
               f"tp/predicted: {_tp_count}/{_predicted1_count}")
         n = max(_diag_steps, 1)
-        print(f"\n  {'#':>3}  {'Feature':<26s}  {'range':<18s}  {'avg score':>10}  {'avg SMI':>9}  {'recall':>7}  {'precision':>9}")
+        print(f"\n  {'#':>3}  {'Feature':<26s}  {'range':<18s}  {'avg score':>10}  {'avg PMI':>9}  {'recall':>7}  {'precision':>9}")
         print(f"  {'-'*3}  {'-'*26}  {'-'*18}  {'-'*10}  {'-'*9}  {'-'*7}  {'-'*9}")
         for i in range(n_inputs):
-            lo = critic.soms[i]._input_min
-            hi = critic.soms[i]._input_max
+            lo = critic.soms[i].obs_min
+            hi = critic.soms[i].obs_max
             range_str = f"[{lo:.3g}, {hi:.3g}]" if lo is not None else "[not yet seen]"
             avg_score = _score_sum[i] / n
-            avg_smi   = _smi_sum[i]   / n
+            avg_pmi   = _pmi_sum[i]   / n
             per_recall    = 100.0 * _per_tp[i] / _per_actual1[i]    if _per_actual1[i]    > 0 else 0.0
             per_precision = 100.0 * _per_tp[i] / _per_predicted1[i] if _per_predicted1[i] > 0 else 0.0
-            print(f"  [{i:2d}] {_input_labels[i]:<26s}  {range_str:<18s}  {avg_score:10.4f}  {avg_smi:9.4f}  {per_recall:6.1f}%  {per_precision:8.1f}%")
+            print(f"  [{i:2d}] {_input_labels[i]:<26s}  {range_str:<18s}  {avg_score:10.4f}  {avg_pmi:9.4f}  {per_recall:6.1f}%  {per_precision:8.1f}%")
         avg_ens_score = _ensemble_score_sum / n
         print(f"\n  Ensemble — avg score: {avg_ens_score:.4f}")
         _tp_count = 0
@@ -174,7 +173,7 @@ while True:
         _per_actual1[:]    = 0
         _per_predicted1[:] = 0
         _score_sum[:] = 0.0
-        _smi_sum[:]   = 0.0
+        _pmi_sum[:]   = 0.0
         _ensemble_score_sum  = 0.0
         _diag_steps = 0
 

@@ -5,7 +5,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtWidgets
 from collections import deque
 sys.path.insert(0, os.path.dirname(__file__))
-from som_1d import SOM1D
+from bayesian_neuron import BayesianNeuron
 
 
 class TrinityCritic:
@@ -14,11 +14,10 @@ class TrinityCritic:
         n_inputs,
         input_ranges=None,
         resolution=10,
-        lr_x=0.001,
-        lr_x1=0.001,
-        neighborhood_decay=10,
+        lr=0.001,
         conscience_factor=0.5,
         conscience_lr=0.001,
+        prior_ema_alpha=0.001,
         visualize=False,
         viz_update_interval=1,
     ):
@@ -30,17 +29,15 @@ class TrinityCritic:
         input_ranges : list of (float, float)
             [(min, max), ...] — one pair per input variable.
         resolution : int
-            Number of neurons per SOM1D.
-        lr_x : float
-            Learning rate for the marginal SOM (x).
-        lr_x1 : float
-            Learning rate for the conditional SOM (x1).
-        neighborhood_decay : float
-            Neighborhood decay constant for SOM1D weight updates.
+            Number of neurons per BayesianNeuron.
+        lr : float
+            Learning rate for weight updates.
         conscience_factor : float
             Conscience factor for the conscience mechanism.
         conscience_lr : float
             Learning rate for the conscience mechanism.
+        prior_ema_alpha : float
+            EMA decay rate for the prior P(instruction=1).
         """
         if input_ranges is not None and len(input_ranges) != n_inputs:
             raise ValueError(
@@ -51,15 +48,14 @@ class TrinityCritic:
         self._viz_step_count = 0
         self.n_inputs = n_inputs
         self.soms = [
-            SOM1D(
+            BayesianNeuron(
                 resolution=resolution,
-                lr_x=lr_x,
-                lr_x1=lr_x1,
-                neighborhood_decay=neighborhood_decay,
+                lr=lr,
                 conscience_factor=conscience_factor,
                 conscience_lr=conscience_lr,
-                input_min=input_ranges[i][0] if input_ranges is not None else None,
-                input_max=input_ranges[i][1] if input_ranges is not None else None,
+                prior_ema_alpha=prior_ema_alpha,
+                obs_min=input_ranges[i][0] if input_ranges is not None else None,
+                obs_max=input_ranges[i][1] if input_ranges is not None else None,
                 visualize=self.visualize,
                 viz_update_interval=self._viz_update_interval,
             )
@@ -83,31 +79,31 @@ class TrinityCritic:
         Returns
         -------
         scores : list of float
-            Probability-like score for instruction == 1 from each SOM1D.
-        smi_values : list of float
-            Specific mutual information value from each SOM1D.
+            Probability-like score for instruction == 1 from each BayesianNeuron.
+        pmi_values : list of float
+            Pointwise mutual information value from each BayesianNeuron.
         """
         scores = []
-        smi_values = []
+        pmi_values = []
         per_predictions = []
         for i, som in enumerate(self.soms):
-            posterior, score, smi = som.step(float(observation[i]), instruction)
-            per_predictions.append(int(posterior))
-            scores.append(score)
-            smi_values.append(smi)
-        return scores, smi_values, per_predictions
+            prediction, posterior, pmi = som.step(float(observation[i]), instruction)
+            per_predictions.append(prediction)
+            scores.append(posterior)
+            pmi_values.append(pmi)
+        return scores, pmi_values, per_predictions
 
-    def _calc_ensemble(self, scores, smi_values):
+    def _calc_ensemble(self, scores, pmi_values):
         if not scores:
             return 0, 0.0
 
-        smi_sq = [s ** 2 for s in smi_values]
-        total_smi_sq = sum(smi_sq)
+        pmi_sq = [s ** 2 if np.isfinite(s) else 0.0 for s in pmi_values]
+        total_pmi_sq = sum(pmi_sq)
 
-        if total_smi_sq > 0.0:
-            weights = [s / total_smi_sq for s in smi_sq]
+        if total_pmi_sq > 0.0:
+            weights = [s / total_pmi_sq for s in pmi_sq]
         else:
-            # Fall back to uniform weights when all SMI values are zero.
+            # Fall back to uniform weights when all PMI values are zero.
             n = len(scores)
             weights = [1.0 / n] * n
 
@@ -135,20 +131,20 @@ class TrinityCritic:
             passed to ensemble_som for final prediction.
         scores : list of float
             Per-SOM probability-like scores.
-        smi_values : list of float
-            Per-SOM specific mutual information values.
+        pmi_values : list of float
+            Per-SOM pointwise mutual information values.
         per_predictions : list of int
-            Per-SOM binary posterior predictions (posterior_instruction from each SOM1D).
+            Per-SOM binary posterior predictions (posterior_instruction from each BayesianNeuron).
         """
-        scores, smi_values, per_predictions = self._aggregate_scores(observation, instruction)
-        ensemble_prediction, ensemble_score = self._calc_ensemble(scores, smi_values)
+        scores, pmi_values, per_predictions = self._aggregate_scores(observation, instruction)
+        ensemble_prediction, ensemble_score = self._calc_ensemble(scores, pmi_values)
 
         if self.visualize:
             self._viz_step_count += 1
             if self._viz_step_count % self._viz_update_interval == 0:
                 self._update_viz(ensemble_score, ensemble_prediction)
 
-        return ensemble_prediction, ensemble_score, scores, smi_values, per_predictions
+        return ensemble_prediction, ensemble_score, scores, pmi_values, per_predictions
 
     def _init_viz(self):
         self._ts_ensemble_score = deque(maxlen=200)
