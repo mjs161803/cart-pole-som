@@ -64,7 +64,7 @@ critic = TrinityCritic(
     conscience_factor=0.5,
     conscience_lr=0.01,
     prior_ema_alpha=0.001,
-    visualize=True,
+    visualize=False,
     viz_update_interval=100,
     feature_names=_input_labels,
 )

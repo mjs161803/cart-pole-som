@@ -18,6 +18,7 @@ class TrinityCritic:
         conscience_factor=0.5,
         conscience_lr=0.001,
         prior_ema_alpha=0.001,
+        ensemble_method='linear',
         visualize=False,
         viz_update_interval=1,
         feature_names=None,
@@ -44,6 +45,9 @@ class TrinityCritic:
             raise ValueError(
                 f"input_ranges length ({len(input_ranges)}) must match n_inputs ({n_inputs})"
             )
+        if ensemble_method not in ('linear', 'loglinear'):
+            raise ValueError(f"ensemble_method must be 'linear' or 'loglinear', got '{ensemble_method}'")
+        self.ensemble_method = ensemble_method
         self.visualize = visualize
         self._viz_update_interval = viz_update_interval
         self._viz_step_count = 0
@@ -96,21 +100,53 @@ class TrinityCritic:
         return scores, pmi_values, per_predictions
 
     def _calc_ensemble(self, scores, pmi_values):
+        if self.ensemble_method == 'loglinear':
+            return self._calc_ensemble_loglinear(scores, pmi_values)
+        return self._calc_ensemble_linear(scores, pmi_values)
+
+    def _calc_ensemble_linear(self, scores, pmi_values):
         if not scores:
             return 0, 0.0
+        
+        relevance = [2 ** s for s in pmi_values]
+        total_relevance = sum(relevance)
 
-        safe_scores = [float(s) if np.isfinite(s) else 0.0 for s in scores]
-        pmi_sq = [s ** 2 if np.isfinite(s) else 0.0 for s in pmi_values]
-        total_pmi_sq = sum(pmi_sq)
-
-        if total_pmi_sq > 0.0:
-            weights = [s / total_pmi_sq for s in pmi_sq]
+        if total_relevance > 0.0:
+            weights = [r / total_relevance for r in relevance]
         else:
             # Fall back to uniform weights when all PMI values are zero.
             n = len(scores)
             weights = [1.0 / n] * n
 
-        ensemble_score = sum(w * s for w, s in zip(weights, safe_scores))
+        ensemble_score = sum(w * s for w, s in zip(weights, scores))
+        if not np.isfinite(ensemble_score):
+            ensemble_score = 0.0
+        ensemble_prediction = 1 if ensemble_score >= 0.5 else 0
+        return ensemble_prediction, ensemble_score
+
+    def _calc_ensemble_loglinear(self, scores, pmi_values):
+        if not scores:
+            return 0, 0.0
+
+        safe_scores = [float(s) if np.isfinite(s) else 0.0 for s in scores]
+        # Use raw PMI values as exponent weights; clip negatives and non-finite to 0.
+        safe_pmi = [float(p) if np.isfinite(p) and p >= 0.0 else 0.0 for p in pmi_values]
+        total_pmi = sum(safe_pmi)
+        if total_pmi > 0.0:
+            weights = [p / total_pmi for p in safe_pmi]
+        else:
+            n = len(scores)
+            weights = [1.0 / n] * n
+
+        # Formal log-linear (opinion-pool) definition:
+        #   ensemble_score = (1/Z) * prod_i( s_i ^ w_i )
+        # where Z normalises over both classes so the result is a valid probability:
+        #   Z = prod_i(s_i^w_i) + prod_i((1-s_i)^w_i)
+        eps = 1e-12
+        unnorm_1 = float(np.exp(sum(w * np.log(max(s,       eps)) for w, s in zip(weights, safe_scores))))
+        unnorm_0 = float(np.exp(sum(w * np.log(max(1.0 - s, eps)) for w, s in zip(weights, safe_scores))))
+        z = unnorm_1 + unnorm_0
+        ensemble_score = (unnorm_1 / z) if z > 0.0 else 0.0
         if not np.isfinite(ensemble_score):
             ensemble_score = 0.0
         ensemble_prediction = 1 if ensemble_score >= 0.5 else 0

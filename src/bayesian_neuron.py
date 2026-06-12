@@ -96,8 +96,11 @@ class BayesianNeuron:
         #11) Calculate final prediction by thresholding posterior at 0.5
         self.calc_prediction()
 
-        #12) Calculate pointwise mutual information between observation and instruction using marginal and conditional BMUs
-        pmi = self.calc_pmi(bmu_m, bmu_c)
+        ##12) Calculate pointwise mutual information between observation and instruction using marginal and conditional BMUs
+        ## pmi = self.calc_pmi(bmu_m, bmu_c)
+        
+        #12) Calculate specific mutual information between all past observations and instruction using Voronoi regions and weighting by conditional density
+        pmi = self.calc_smi()
     
         if self.visualize:
             self._viz_step_count += 1
@@ -246,6 +249,48 @@ class BayesianNeuron:
             return 0.0
         pmi = np.log2(self.v_c[bmu_c]/self.v_m[bmu_m])  # PMI(observation; instruction) = log2(P(observation|instruction=1) / P(observation))
         return pmi
+
+    def calc_smi(self):
+        """
+        Estimate KL( p_{x|inst=1} || p_x ) — the KL divergence from the
+        marginal to the conditional distribution — by iterating over every
+        Voronoi region of the conditional neurons and accumulating the
+        expectation of the pointwise log-density ratio.
+
+        For each conditional neuron k:
+          1. Find its corresponding BMU k' in the marginal w_m using
+             the weight position w_c[k] as the query.
+          2. Compute the per-region log-ratio:
+               smi_k = log2( v_m[k'] / v_c[k] )
+          3. Weight by the normalised conditional density:
+               p_k = 1.0 / v_c[k] / sum_j( 1.0 / v_c[j] )
+
+        Aggregate:
+          SMI = sum_k  p_k * smi_k  ≈  KL( p_{x|inst=1} || p_x )
+
+        Weighting by the conditional density ensures that neurons where it
+        is concentrated (small Voronoi cells, high density) dominate the
+        sum, giving positive values when conditional is more concentrated 
+        than the marginal.
+
+        Returns
+        -------
+        smi : float
+            Approximate KL divergence in bits. Positive values indicate that
+            the conditional distribution is more concentrated than the
+            marginal (X is informative about instruction=1).
+        """
+        smi = 0.0
+        total_weight = 0.0
+        for k in range(self.resolution):
+            bmu_m = self.find_bmu_marginal(self.w_c[k])
+            smi_k = np.log2(self.v_m[bmu_m] / self.v_c[k]) if self.v_c[k] > 0.0 and self.v_m[bmu_m] > 0.0 else 0.0
+            p_k = 1.0 / self.v_c[k] if self.v_c[k] > 0.0 else 0.0
+            total_weight += p_k
+            smi += p_k * smi_k
+        if total_weight > 0.0:
+            smi /= total_weight
+        return smi
 
     def _init_viz(self):
         self._ts_instruction = deque(maxlen=200)
