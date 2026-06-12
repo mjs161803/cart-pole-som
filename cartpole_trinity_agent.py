@@ -9,8 +9,8 @@ if sys.platform == "linux":
     os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts")
     os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
 elif sys.platform == "darwin":
-    # macOS: EGL unavailable; GLFW uses native Cocoa, Qt uses Cocoa by default
-    os.environ["MUJOCO_GL"] = "glfw"
+    # macOS: disable MuJoCo GL backend (valid dm_control value) since this script doesn't render MuJoCo frames
+    os.environ["MUJOCO_GL"] = "disable"
 elif sys.platform == "win32":
     # Windows: GLFW is the standard rendering backend for MuJoCo
     os.environ["MUJOCO_GL"] = "glfw"
@@ -35,27 +35,38 @@ action_spec = env.action_spec()
 # Reset the environment to start
 time_step = env.reset()
 
-# Cartpole-specific feature vector: replace cos(θ)/sin(θ) with θ = arctan2(sin, cos)
-# Features: [cart_pos, θ, cart_vel, pole_angular_vel]
-# Input ranges are tracked dynamically by each SOM1D from observed data.
-_input_labels = [
-    'Cart Position',
-    'Pole Angle θ',
-    'Cart Velocity',
-    'Pole Angular Velocity',
+# ---------------------------------------------------------------------------
+# Feature selection — comment out any line to exclude that feature from the
+# critic.  _input_labels and _process_obs are derived automatically.
+# ---------------------------------------------------------------------------
+_feature_spec = [
+    # (label,                   extractor)
+    ('Cart Position',           lambda obs: float(obs['position'][0])),
+    ('Pole Angle theta',        lambda obs: float(np.arctan2(obs['position'][2], obs['position'][1]))),
+    ('Cart Velocity',           lambda obs: float(obs['velocity'][0])),
+    ('Pole Angular Velocity',   lambda obs: float(obs['velocity'][1])),
 ]
+
+_input_labels = [name for name, _ in _feature_spec]
 n_inputs = len(_input_labels)
 
-# Instantiate the TrinityCritic (one SOM1D per scalar observation dimension)
+
+def _process_obs(observation):
+    """Build the critic feature vector from the active _feature_spec entries."""
+    return np.array([fn(observation) for _, fn in _feature_spec])
+
+
+# Instantiate the TrinityCritic (one BayesianNeuron per active feature)
 critic = TrinityCritic(
     n_inputs=n_inputs,
-    resolution=180,
-    lr=0.0005,
+    resolution=40,
+    lr=0.01,
     conscience_factor=0.5,
-    conscience_lr=0.0005,
-    prior_ema_alpha=0.0005,
-    visualize=False,
+    conscience_lr=0.01,
+    prior_ema_alpha=0.001,
+    visualize=True,
     viz_update_interval=100,
+    feature_names=_input_labels,
 )
 
 # Ensemble-level prediction counters
@@ -73,15 +84,6 @@ _score_sum = np.zeros(n_inputs)
 _pmi_sum   = np.zeros(n_inputs)
 _ensemble_score_sum  = 0.0
 _diag_steps = 0
-
-
-def _process_obs(observation):
-    """Convert observation dict to feature vector, replacing cos/sin with θ."""
-    cart_pos = float(observation['position'][0])
-    theta    = float(np.arctan2(observation['position'][2], observation['position'][1]))
-    cart_vel = float(observation['velocity'][0])
-    pole_vel = float(observation['velocity'][1])
-    return np.array([cart_pos, theta, cart_vel, pole_vel])
 
 # Camera render window (commented out for faster simulation)
 # _cam_win = pg.GraphicsLayoutWidget(title='Cart-Pole Camera')
@@ -113,8 +115,8 @@ while True:
     # Flatten the observation dict into a feature vector for the critic, converting cos/sin to θ
     obs_flat = _process_obs(observation)
 
-    # Define instruction based on pole angle: 1.0 if |θ| ≤ 5 degrees, else 0.0
-    pole_angle = obs_flat[1]
+    # Define instruction based on pole angle: 1.0 if |θ| <= 5 degrees, else 0.0
+    pole_angle = float(np.arctan2(observation['position'][2], observation['position'][1]))
     instruction = 1.0 if abs(pole_angle) <= np.deg2rad(5.0) else 0.0
 
     # Step the TrinityCritic

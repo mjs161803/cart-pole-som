@@ -20,6 +20,7 @@ class TrinityCritic:
         prior_ema_alpha=0.001,
         visualize=False,
         viz_update_interval=1,
+        feature_names=None,
     ):
         """
         Parameters
@@ -58,6 +59,7 @@ class TrinityCritic:
                 obs_max=input_ranges[i][1] if input_ranges is not None else None,
                 visualize=self.visualize,
                 viz_update_interval=self._viz_update_interval,
+                feature_name=feature_names[i] if feature_names is not None else '',
             )
             for i in range(n_inputs)
         ]
@@ -97,6 +99,7 @@ class TrinityCritic:
         if not scores:
             return 0, 0.0
 
+        safe_scores = [float(s) if np.isfinite(s) else 0.0 for s in scores]
         pmi_sq = [s ** 2 if np.isfinite(s) else 0.0 for s in pmi_values]
         total_pmi_sq = sum(pmi_sq)
 
@@ -107,7 +110,9 @@ class TrinityCritic:
             n = len(scores)
             weights = [1.0 / n] * n
 
-        ensemble_score = sum(w * s for w, s in zip(weights, scores))
+        ensemble_score = sum(w * s for w, s in zip(weights, safe_scores))
+        if not np.isfinite(ensemble_score):
+            ensemble_score = 0.0
         ensemble_prediction = 1 if ensemble_score >= 0.5 else 0
         return ensemble_prediction, ensemble_score
 
@@ -179,12 +184,12 @@ class TrinityCritic:
         self._win.show()
 
     def _update_viz(self, ensemble_score, ensemble_prediction):
-        self._ts_ensemble_score.append(float(ensemble_score))
+        self._ts_ensemble_score.append(float(ensemble_score) if np.isfinite(ensemble_score) else 0.0)
         self._ts_ensemble_prediction.append(float(ensemble_prediction))
 
         ts_data = [self._ts_ensemble_score, self._ts_ensemble_prediction]
         for i, ts_deque in enumerate(ts_data):
-            ts = np.array(ts_deque)
+            ts = np.nan_to_num(np.array(ts_deque), nan=0.0, posinf=0.0, neginf=0.0)
             self._tc_ts_curves[i].setData(np.arange(len(ts), dtype=float), ts)
             if i == 0 and len(ts) > 0:  # auto-range for ensemble score
                 cur_max = float(np.max(ts))
