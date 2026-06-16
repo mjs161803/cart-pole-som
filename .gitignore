@@ -13,3 +13,12 @@ build/
 
 # macOS
 .DS_Store
+
+# LaTeX ignore
+*.aux
+*.log
+*.toc
+*.blg
+*.bbl
+*.synctex.gz
+*.pdf  # Optional: only ignore if you don't want the compiled paper on Git
