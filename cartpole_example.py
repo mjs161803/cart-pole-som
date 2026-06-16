@@ -20,7 +20,7 @@ import numpy as np
 # import pyqtgraph as pg
 # pg.setConfigOptions(imageAxisOrder='row-major')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
-from trinity_critic import TrinityCritic
+from trinity_agent import TrinityAgent
 
 # 1. Load the environment with an infinite time limit for online training
 env = suite.load(
@@ -56,17 +56,25 @@ def _process_obs(observation):
     return np.array([fn(observation) for _, fn in _feature_spec])
 
 
-# Instantiate the TrinityCritic (one BayesianNeuron per active feature)
-critic = TrinityCritic(
-    n_inputs=n_inputs,
-    resolution=40,
-    lr=0.01,
-    conscience_factor=0.5,
-    conscience_lr=0.01,
-    prior_ema_alpha=0.001,
-    visualize=False,
-    viz_update_interval=100,
+# Instantiate TrinityAgent
+agent = TrinityAgent(
+    observation_dim=n_inputs,
+    critic_resolution=40,
+    critic_lr=0.001,
+    critic_conscience_factor=0.5,
+    critic_conscience_lr=0.001,
+    critic_prior_ema_alpha=0.001,
+    critic_visualize=True,
+    critic_viz_update_interval=100,
     feature_names=_input_labels,
+    encoder_learning_rate=0.001,
+    encoder_semantic_codelength=8,
+    encoder_resolution=40,
+    encoder_conscience_factor=0.5,
+    encoder_conscience_lr=0.001,
+    encoder_prior_ema_alpha=0.001,
+    encoder_visualize=True,
+    encoder_viz_update_interval=100,
 )
 
 # Ensemble-level prediction counters
@@ -117,10 +125,12 @@ while True:
 
     # Define instruction based on pole angle: 1.0 if |θ| <= 5 degrees, else 0.0
     pole_angle = float(np.arctan2(observation['position'][2], observation['position'][1]))
-    instruction = 1.0 if abs(pole_angle) <= np.deg2rad(5.0) else 0.0
+    instruction = 1.0 if (abs(pole_angle) <= np.deg2rad(5.0) ) else 0.0
+    #pole_angular_velocity = float(observation['velocity'][1])
+    #instruction = 1.0 if (abs(pole_angle) <= np.deg2rad(5.0) and abs(pole_angular_velocity) <= np.deg2rad(5.0)) else 0.0
 
     # Step the TrinityCritic
-    ensemble_prediction, ensemble_score, scores, pmi_values, per_predictions = critic.step(obs_flat, instruction)
+    semantic_code, ensemble_prediction, ensemble_score, scores, pmi_values, per_predictions = agent.step(obs_flat, instruction)
 
     # Update ensemble-level counters
     if instruction == 1.0:
@@ -158,8 +168,8 @@ while True:
         print(f"\n  {'#':>3}  {'Feature':<26s}  {'range':<18s}  {'avg score':>10}  {'avg PMI':>9}  {'recall':>7}  {'precision':>9}")
         print(f"  {'-'*3}  {'-'*26}  {'-'*18}  {'-'*10}  {'-'*9}  {'-'*7}  {'-'*9}")
         for i in range(n_inputs):
-            lo = critic.soms[i].obs_min
-            hi = critic.soms[i].obs_max
+            lo = agent.critic.soms[i].obs_min
+            hi = agent.critic.soms[i].obs_max
             range_str = f"[{lo:.3g}, {hi:.3g}]" if lo is not None else "[not yet seen]"
             avg_score = _score_sum[i] / n
             avg_pmi   = _pmi_sum[i]   / n

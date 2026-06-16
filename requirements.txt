@@ -6,3 +6,4 @@ scikit-learn
 matplotlib
 pyqtgraph
 pyqt6
+networkx

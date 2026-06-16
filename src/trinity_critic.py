@@ -19,8 +19,8 @@ class TrinityCritic:
         conscience_lr=0.001,
         prior_ema_alpha=0.001,
         ensemble_method='linear',
-        visualize=False,
-        viz_update_interval=1,
+        critic_visualize=False,
+        critic_viz_update_interval=1,
         feature_names=None,
     ):
         """
@@ -48,8 +48,8 @@ class TrinityCritic:
         if ensemble_method not in ('linear', 'loglinear'):
             raise ValueError(f"ensemble_method must be 'linear' or 'loglinear', got '{ensemble_method}'")
         self.ensemble_method = ensemble_method
-        self.visualize = visualize
-        self._viz_update_interval = viz_update_interval
+        self.visualize = critic_visualize
+        self._viz_update_interval = critic_viz_update_interval
         self._viz_step_count = 0
         self.n_inputs = n_inputs
         self.soms = [
