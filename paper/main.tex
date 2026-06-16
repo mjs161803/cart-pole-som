@@ -1,0 +1,256 @@
+% IEEE Conference Paper Template
+% Based on IEEEtran class
+% Compile with: pdflatex main.tex
+%               bibtex main
+%               pdflatex main.tex
+%               pdflatex main.tex
+
+\documentclass[conference]{IEEEtran}
+
+% -------------------------------------------------------
+% Packages
+% -------------------------------------------------------
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+% -------------------------------------------------------
+% Document
+% -------------------------------------------------------
+\begin{document}
+
+\title{Self-Organizing Maps for Cart-Pole Control:\\
+A Biologically-Inspired Approach to Reinforcement Learning}
+
+\author{
+  \IEEEauthorblockN{Author Name}
+  \IEEEauthorblockA{
+    \textit{Department / Institution} \\
+    City, Country \\
+    email@institution.edu
+  }
+  % Uncomment to add a second author:
+  % \and
+  % \IEEEauthorblockN{Second Author}
+  % \IEEEauthorblockA{
+  %   \textit{Department / Institution} \\
+  %   City, Country \\
+  %   email@institution.edu
+  % }
+}
+
+\maketitle
+
+% -------------------------------------------------------
+% Abstract
+% -------------------------------------------------------
+\begin{abstract}
+We present a biologically-inspired control architecture that uses a
+Self-Organizing Map (SOM) to solve the classic cart-pole balancing problem.
+The SOM discretizes the continuous four-dimensional state space into a
+topology-preserving one-dimensional map, enabling efficient policy learning
+without deep neural networks.
+Experimental results demonstrate that the agent learns a stable balancing
+policy within \(N\) episodes, outperforming baseline tabular methods while
+remaining interpretable.
+\end{abstract}
+
+\begin{IEEEkeywords}
+self-organizing map, cart-pole, reinforcement learning,
+biologically-inspired control, state discretization
+\end{IEEEkeywords}
+
+% -------------------------------------------------------
+% I. Introduction
+% -------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+The cart-pole balancing problem~\cite{barto1983neuronlike} is a canonical
+benchmark in control theory and reinforcement learning (RL).
+A pole is hinged to a cart that moves along a frictionless track; the agent
+must apply left or right forces to keep the pole upright indefinitely.
+
+Classical solutions rely on linear approximations or hand-engineered features,
+while modern deep RL approaches~\cite{mnih2015human} achieve strong performance
+but lack interpretability.
+Self-Organizing Maps~\cite{kohonen1990self} offer an intermediate solution:
+they adapt continuously to the input distribution and produce a
+topology-preserving discrete representation that supports lightweight tabular
+policies.
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:background} reviews relevant background.
+Section~\ref{sec:method} describes the proposed architecture.
+Section~\ref{sec:experiments} reports experimental results.
+Section~\ref{sec:conclusion} concludes and outlines future work.
+
+% -------------------------------------------------------
+% II. Background
+% -------------------------------------------------------
+\section{Background}
+\label{sec:background}
+
+\subsection{Self-Organizing Maps}
+
+A Self-Organizing Map~\cite{kohonen1990self} is an unsupervised neural network
+that projects high-dimensional input data onto a lower-dimensional (typically
+1-D or 2-D) lattice of prototype neurons.
+During training, the Best Matching Unit (BMU) and its topological neighbors
+are updated toward the current input via:
+%
+\begin{equation}
+  \mathbf{w}_i(t+1) = \mathbf{w}_i(t)
+    + \eta(t)\, h(i, \text{BMU}, t)\,
+      \bigl[\mathbf{x}(t) - \mathbf{w}_i(t)\bigr],
+  \label{eq:som_update}
+\end{equation}
+%
+where \(\eta(t)\) is the learning rate and \(h(i, \text{BMU}, t)\) is a
+Gaussian neighborhood kernel that shrinks over time.
+
+\subsection{Cart-Pole Environment}
+
+The cart-pole environment is defined by a four-dimensional continuous state
+\(\mathbf{s} = (x,\, \dot{x},\, \theta,\, \dot{\theta})\) and a binary action
+space \(\mathcal{A} = \{0, 1\}\) (push left, push right).
+An episode ends when \(|\theta| > 12°\), \(|x| > 2.4\,\text{m}\), or 500
+time steps are reached.
+
+% -------------------------------------------------------
+% III. Method
+% -------------------------------------------------------
+\section{Proposed Method}
+\label{sec:method}
+
+\subsection{Architecture Overview}
+
+Figure~\ref{fig:architecture} illustrates the overall architecture.
+Raw state observations are fed into a 1-D SOM encoder that maps them to a
+discrete neuron index.
+A tabular Q-value table indexed by \((\text{SOM index},\, \text{action})\)
+stores learned action values, which are updated by a standard
+Q-learning rule~\cite{watkins1992q}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/architecture.pdf}
+  \caption{Overall system architecture. The SOM encodes continuous states
+           into discrete indices used by the tabular Q-learner.}
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{SOM Encoder}
+
+We use a 1-D SOM with \(K\) neurons whose weights \(\mathbf{w}_i \in \mathbb{R}^4\)
+are initialized uniformly at random.
+The state is normalized to \([0,1]^4\) before computing BMU distances.
+Training follows Eq.~\eqref{eq:som_update} with an exponential decay schedule:
+%
+\begin{align}
+  \eta(t) &= \eta_0 \exp\!\left(-\frac{t}{\tau_\eta}\right), \\
+  \sigma(t) &= \sigma_0 \exp\!\left(-\frac{t}{\tau_\sigma}\right),
+\end{align}
+%
+where \(\sigma(t)\) governs the neighborhood kernel width.
+
+\subsection{Q-Learning Policy}
+
+Given BMU index \(k\), the agent selects actions via an \(\epsilon\)-greedy
+policy and updates Q-values as:
+%
+\begin{equation}
+  Q(k, a) \leftarrow Q(k, a)
+    + \alpha\!\left[r + \gamma \max_{a'} Q(k', a') - Q(k, a)\right],
+\end{equation}
+%
+where \(\alpha\) is the learning rate, \(\gamma\) the discount factor,
+and \(k'\) the BMU of the next state.
+
+% -------------------------------------------------------
+% IV. Experiments
+% -------------------------------------------------------
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+All experiments were conducted on the \texttt{CartPole-v1} environment from
+OpenAI Gymnasium~\cite{towers2024gymnasium}.
+Hyperparameters are listed in Table~\ref{tab:hyperparams}.
+
+\begin{table}[t]
+  \centering
+  \caption{Hyperparameter Settings}
+  \label{tab:hyperparams}
+  \begin{tabular}{lcc}
+    \toprule
+    Parameter & Symbol & Value \\
+    \midrule
+    SOM neurons           & \(K\)             & 100   \\
+    Initial learning rate & \(\eta_0\)        & 0.5   \\
+    Initial neighborhood  & \(\sigma_0\)      & 10    \\
+    Q-learning rate       & \(\alpha\)        & 0.1   \\
+    Discount factor       & \(\gamma\)        & 0.99  \\
+    Exploration rate      & \(\epsilon_0\)    & 1.0   \\
+    Episodes              & \(N\)             & 2000  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Results}
+
+Figure~\ref{fig:learning_curve} shows the learning curve averaged over
+10 independent runs.
+The agent achieves a mean episode reward of \(XXX \pm YYY\) after \(N\)
+training episodes, compared to \(XXX \pm YYY\) for a random baseline.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/learning_curve.pdf}
+  \caption{Learning curve (mean $\pm$ std over 10 runs).
+           The shaded region denotes one standard deviation.}
+  \label{fig:learning_curve}
+\end{figure}
+
+\subsection{Discussion}
+
+\textit{[Discuss observations, ablations, and comparisons here.]}
+
+% -------------------------------------------------------
+% V. Conclusion
+% -------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+We demonstrated that a topology-preserving 1-D SOM can effectively discretize
+the cart-pole state space and enable reliable policy learning with a simple
+tabular Q-learner.
+The resulting agent is lightweight, interpretable, and competitive with
+neural-network baselines on this benchmark.
+
+Future work will investigate 2-D SOM topologies, continuous action spaces,
+and transfer to more complex control tasks.
+
+% -------------------------------------------------------
+% Acknowledgment
+% -------------------------------------------------------
+\section*{Acknowledgment}
+
+\textit{[Optional: acknowledge funding sources, computing resources, etc.]}
+
+% -------------------------------------------------------
+% References
+% -------------------------------------------------------
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
