@@ -17,10 +17,16 @@ elif sys.platform == "win32":
 
 from dm_control import suite
 import numpy as np
-# import pyqtgraph as pg
-# pg.setConfigOptions(imageAxisOrder='row-major')
+import pyqtgraph as pg
+pg.setConfigOptions(imageAxisOrder='row-major')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from trinity_agent import TrinityAgent
+
+# ---------------------------------------------------------------------------
+# Rendering toggle — set to False for faster simulation
+# ---------------------------------------------------------------------------
+RENDER_CARTPOLE = False
+RENDER_INTERVAL = 1   # render camera every N steps
 
 # 1. Load the environment with an infinite time limit for online training
 env = suite.load(
@@ -41,10 +47,10 @@ time_step = env.reset()
 # ---------------------------------------------------------------------------
 _feature_spec = [
     # (label,                   extractor)
-    ('Cart Position',           lambda obs: float(obs['position'][0])),
+    #('Cart Position',           lambda obs: float(obs['position'][0])),
     ('Pole Angle theta',        lambda obs: float(np.arctan2(obs['position'][2], obs['position'][1]))),
-    ('Cart Velocity',           lambda obs: float(obs['velocity'][0])),
-    ('Pole Angular Velocity',   lambda obs: float(obs['velocity'][1])),
+    #('Cart Velocity',           lambda obs: float(obs['velocity'][0])),
+    #('Pole Angular Velocity',   lambda obs: float(obs['velocity'][1])),
 ]
 
 _input_labels = [name for name, _ in _feature_spec]
@@ -59,22 +65,22 @@ def _process_obs(observation):
 # Instantiate TrinityAgent
 agent = TrinityAgent(
     observation_dim=n_inputs,
-    critic_resolution=40,
-    critic_lr=0.001,
+    critic_resolution=90,
+    critic_lr=0.005,
     critic_conscience_factor=0.5,
-    critic_conscience_lr=0.001,
+    critic_conscience_lr=0.005,
     critic_prior_ema_alpha=0.001,
-    critic_visualize=True,
-    critic_viz_update_interval=100,
+    critic_visualize=False,
+    critic_viz_update_interval=1,
     feature_names=_input_labels,
-    encoder_learning_rate=0.001,
+    encoder_learning_rate=0.01,
     encoder_semantic_codelength=8,
-    encoder_resolution=40,
+    encoder_resolution=90,
     encoder_conscience_factor=0.5,
-    encoder_conscience_lr=0.001,
+    encoder_conscience_lr=0.01,
     encoder_prior_ema_alpha=0.001,
     encoder_visualize=True,
-    encoder_viz_update_interval=100,
+    encoder_viz_update_interval=1,
 )
 
 # Ensemble-level prediction counters
@@ -93,21 +99,24 @@ _pmi_sum   = np.zeros(n_inputs)
 _ensemble_score_sum  = 0.0
 _diag_steps = 0
 
-# Camera render window (commented out for faster simulation)
-# _cam_win = pg.GraphicsLayoutWidget(title='Cart-Pole Camera')
-# _cam_win.resize(640, 480)
-# _cam_vb = _cam_win.addViewBox()
-# _cam_vb.setAspectLocked(True)
-# _cam_vb.invertY(True)
-# _cam_img = pg.ImageItem()
-# _cam_vb.addItem(_cam_img)
-# _cam_win.show()
-# _app = pg.QtWidgets.QApplication.instance()
+# Camera render window
+if RENDER_CARTPOLE:
+    _cam_win = pg.GraphicsLayoutWidget(title='Cart-Pole Camera')
+    _cam_win.resize(640, 480)
+    _cam_vb = _cam_win.addViewBox()
+    _cam_vb.setAspectLocked(True)
+    _cam_vb.invertY(True)
+    _cam_img = pg.ImageItem()
+    _cam_vb.addItem(_cam_img)
+    _cam_win.show()
+    _app = pg.QtWidgets.QApplication.instance()
+
+# Semantic code bit accumulators
+_semantic_code_sum = np.zeros(agent.encoder.semantic_codelength)
 
 # Sinusoidal action parameters
 _step = 0
 _action_freq = .01   # cycles per step (adjust to taste)
-# _render_interval = 1000  # render camera every N steps (higher = faster simulation)
 
 # 2. Infinite training loop
 while True:
@@ -126,10 +135,8 @@ while True:
     # Define instruction based on pole angle: 1.0 if |θ| <= 5 degrees, else 0.0
     pole_angle = float(np.arctan2(observation['position'][2], observation['position'][1]))
     instruction = 1.0 if (abs(pole_angle) <= np.deg2rad(5.0) ) else 0.0
-    #pole_angular_velocity = float(observation['velocity'][1])
-    #instruction = 1.0 if (abs(pole_angle) <= np.deg2rad(5.0) and abs(pole_angular_velocity) <= np.deg2rad(5.0)) else 0.0
-
-    # Step the TrinityCritic
+    
+    # Step the TrinityAgent with the current observation and instruction
     semantic_code, ensemble_prediction, ensemble_score, scores, pmi_values, per_predictions = agent.step(obs_flat, instruction)
 
     # Update ensemble-level counters
@@ -154,6 +161,7 @@ while True:
         _score_sum[i] += scores[i]
         _pmi_sum[i]   += pmi_values[i]
     _ensemble_score_sum  += ensemble_score
+    _semantic_code_sum   += semantic_code
     _diag_steps += 1
 
     # Print diagnostics every 50000 steps, then reset counters
@@ -178,6 +186,8 @@ while True:
             print(f"  [{i:2d}] {_input_labels[i]:<26s}  {range_str:<18s}  {avg_score:10.4f}  {avg_pmi:9.4f}  {per_recall:6.1f}%  {per_precision:8.1f}%")
         avg_ens_score = _ensemble_score_sum / n
         print(f"\n  Ensemble — avg score: {avg_ens_score:.4f}")
+        avg_bits = _semantic_code_sum / n
+        print(f"\n  Semantic code avg bits: [{', '.join(f'{v:.3f}' for v in avg_bits)}]")
         _tp_count = 0
         _instruction1_count = 0
         _predicted1_count = 0
@@ -187,10 +197,11 @@ while True:
         _score_sum[:] = 0.0
         _pmi_sum[:]   = 0.0
         _ensemble_score_sum  = 0.0
+        _semantic_code_sum[:] = 0.0
         _diag_steps = 0
 
     # 3. Visual Rendering: render cartpole camera to PyQtGraph window
-    # if _step % _render_interval == 0:
-    #     pixels = env.physics.render(camera_id=0, height=480, width=640)
-    #     _cam_img.setImage(pixels)
-    #     _app.processEvents()
+    if RENDER_CARTPOLE and _step % RENDER_INTERVAL == 0:
+        pixels = env.physics.render(camera_id=0, height=480, width=640)
+        _cam_img.setImage(pixels)
+        _app.processEvents()
